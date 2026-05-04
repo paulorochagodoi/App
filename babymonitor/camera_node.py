@@ -2,6 +2,7 @@
 from __future__ import annotations
 import asyncio
 import os
+import signal
 import sys
 import threading
 import uvicorn
@@ -31,12 +32,25 @@ def main() -> None:
     stream.start()
 
     # Recorder (wraps stream)
-    recorder = Recorder(stream, cfg.recordings.output_dir)
+    recorder = Recorder(
+        stream,
+        cfg.recordings.output_dir,
+        max_recordings=cfg.recordings.max_recordings,
+        min_free_mb=cfg.recordings.min_free_mb,
+    )
+
+    # Cry detector (created before app so health endpoint can check it)
+    cry_detector = CryDetector(
+        sample_rate=cfg.cry_detector.sample_rate,
+        chunk_size=cfg.cry_detector.chunk_size,
+        threshold=cfg.cry_detector.threshold,
+        silence_timeout=cfg.cry_detector.silence_timeout,
+    )
 
     # FastAPI app
-    app = create_app(cfg, recorder)
+    app = create_app(cfg, recorder, cry_detector)
 
-    # Cry detector — async bridge
+    # Async bridge: detector callbacks → asyncio loop
     loop = asyncio.new_event_loop()
 
     def on_cry(confidence: float) -> None:
@@ -50,12 +64,10 @@ def main() -> None:
         if recorder.is_recording():
             recorder.stop()
 
-    cry_detector = CryDetector(
-        sample_rate=cfg.cry_detector.sample_rate,
-        chunk_size=cfg.cry_detector.chunk_size,
-        threshold=cfg.cry_detector.threshold,
-        silence_timeout=cfg.cry_detector.silence_timeout,
-    )
+    # Calibrate ambient noise before starting detection
+    if cfg.cry_detector.calibrate_on_start:
+        cry_detector.calibrate()
+
     cry_detector.start(on_cry, on_silence)
 
     # Network FSM
@@ -63,10 +75,9 @@ def main() -> None:
 
     def on_state_change(state: ConnectionState, detail: str) -> None:
         nonlocal mdns_advertiser
-        if state == ConnectionState.STREAMING:
-            if mdns_advertiser is None:
-                mdns_advertiser = MDNSAdvertiser(detail or cfg.ap.ip)
-                mdns_advertiser.start()
+        if state == ConnectionState.STREAMING and mdns_advertiser is None:
+            mdns_advertiser = MDNSAdvertiser(detail or cfg.ap.ip)
+            mdns_advertiser.start()
 
     fsm = CameraFSM(
         ap_ssid=cfg.ap.ssid,
@@ -77,20 +88,35 @@ def main() -> None:
     )
     fsm.start()
 
-    # Run FastAPI in the async loop
-    config = uvicorn.Config(
+    # uvicorn server
+    uv_config = uvicorn.Config(
         app,
         host=cfg.server.host,
         port=cfg.server.port,
         loop="asyncio",
         access_log=False,
     )
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(uv_config)
 
-    async def serve() -> None:
-        await server.serve()
+    def _shutdown(signum: int, frame) -> None:
+        log.info("Shutdown signal received (signal %d)", signum)
+        server.should_exit = True
 
-    loop.run_until_complete(serve())
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    try:
+        loop.run_until_complete(server.serve())
+    finally:
+        log.info("Shutting down components...")
+        fsm.stop()
+        cry_detector.stop()
+        if recorder.is_recording():
+            recorder.stop()
+        if mdns_advertiser:
+            mdns_advertiser.stop()
+        stream.stop()
+        log.info("Camera node stopped")
 
 
 if __name__ == "__main__":

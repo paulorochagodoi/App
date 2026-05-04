@@ -5,8 +5,10 @@ Manages WiFi connection FSM and writes the camera URL to
 and launch Chromium pointing at the right address.
 """
 from __future__ import annotations
+import signal
 import subprocess
 import sys
+import threading
 
 from babymonitor.common.config import load_monitor_config
 from babymonitor.common.logger import get_logger
@@ -42,7 +44,20 @@ def main() -> None:
         on_camera_url=restart_kiosk,
     )
     fsm.start()
-    fsm.join()
+
+    stop_event = threading.Event()
+
+    def _shutdown(signum: int, frame) -> None:
+        log.info("Shutdown signal received (signal %d)", signum)
+        fsm.stop()
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
+    stop_event.wait()
+    fsm.join(timeout=5)
+    log.info("Monitor node stopped")
 
 
 if __name__ == "__main__":

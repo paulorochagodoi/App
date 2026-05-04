@@ -2,18 +2,21 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiofiles
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from babymonitor.common.logger import get_logger
 
 if TYPE_CHECKING:
+    from babymonitor.camera.cry_detector import CryDetector
     from babymonitor.camera.recorder import Recorder
     from babymonitor.common.config import CameraConfig
 
@@ -22,14 +25,33 @@ log = get_logger(__name__)
 WEB_DIR = Path(__file__).parent.parent.parent / "web"
 
 
-def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
+def create_app(
+    cfg: "CameraConfig",
+    recorder: "Recorder",
+    cry_detector: "CryDetector | None" = None,
+) -> FastAPI:
     app = FastAPI(title="BabyMonitor API")
     connected_ws: set[WebSocket] = set()
 
-    # ── Static frontend ──────────────────────────────────────────────────────
+    # ── Auth dependency (POST endpoints only) ────────────────────────────────
+    def require_token(x_api_token: str | None = Header(None)) -> None:
+        if cfg.security.api_token and x_api_token != cfg.security.api_token:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # ── Frontend (inject token into HTML so the JS can read it) ─────────────
     @app.get("/", response_class=HTMLResponse)
     async def index():
-        return FileResponse(WEB_DIR / "index.html")
+        html = (WEB_DIR / "index.html").read_text()
+        token = cfg.security.api_token or ""
+        return HTMLResponse(html.replace("__API_TOKEN__", token))
+
+    @app.get("/sw.js")
+    async def service_worker():
+        return FileResponse(
+            WEB_DIR / "sw.js",
+            media_type="application/javascript",
+            headers={"Service-Worker-Allowed": "/"},
+        )
 
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
@@ -66,14 +88,17 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
             headers={"Accept-Ranges": "bytes"},
         )
 
-    @app.post("/api/recording/start")
+    @app.post("/api/recording/start", dependencies=[Depends(require_token)])
     async def start_recording():
         path = recorder.start()
         if path is None:
-            raise HTTPException(status_code=409, detail="Already recording or stream not ready")
+            raise HTTPException(
+                status_code=409,
+                detail="Already recording, stream not ready, or insufficient disk space",
+            )
         return {"status": "recording", "file": os.path.basename(path)}
 
-    @app.post("/api/recording/stop")
+    @app.post("/api/recording/stop", dependencies=[Depends(require_token)])
     async def stop_recording():
         path = recorder.stop()
         return {"status": "stopped", "file": os.path.basename(path) if path else None}
@@ -83,13 +108,11 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
         ssid: str
         password: str
 
-    @app.post("/api/wifi/configure")
+    @app.post("/api/wifi/configure", dependencies=[Depends(require_token)])
     async def configure_wifi(req: WifiRequest):
-        import yaml
         from babymonitor.common.config import save_camera_config
         cfg.fallback_wifi.ssid = req.ssid.strip()
         cfg.fallback_wifi.password = req.password
-        # Persist to config file so the FSM picks it up on restart
         config_path = os.environ.get("CAMERA_CONFIG", "/etc/babymonitor/camera.yaml")
         try:
             save_camera_config(cfg, config_path)
@@ -106,6 +129,31 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
             "current_file": recorder.current_file(),
         }
 
+    # ── Health ───────────────────────────────────────────────────────────────
+    @app.get("/api/health")
+    async def health():
+        hls_path = Path(cfg.streaming.hls_dir) / "live.m3u8"
+        hls_exists = hls_path.exists()
+        hls_fresh = hls_exists and (time.time() - hls_path.stat().st_mtime) < 10
+
+        try:
+            du = shutil.disk_usage(cfg.recordings.output_dir)
+            disk = {
+                "free_gb": round(du.free / 1e9, 2),
+                "used_pct": round(du.used / du.total * 100, 1),
+            }
+        except OSError:
+            disk = {"free_gb": None, "used_pct": None}
+
+        stream_ok = hls_exists and hls_fresh
+        return {
+            "status": "ok" if stream_ok else "degraded",
+            "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
+            "detector": {"running": cry_detector.is_running() if cry_detector else False},
+            "recording": recorder.is_recording(),
+            "disk": disk,
+        }
+
     # ── WebSocket alerts ─────────────────────────────────────────────────────
     @app.websocket("/ws/alerts")
     async def ws_alerts(websocket: WebSocket):
@@ -114,7 +162,7 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
         log.info("WS client connected (%d total)", len(connected_ws))
         try:
             while True:
-                await asyncio.sleep(30)  # keep-alive ping
+                await asyncio.sleep(30)
                 await websocket.send_text(json.dumps({"type": "ping"}))
         except WebSocketDisconnect:
             pass
@@ -126,7 +174,7 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
         if not connected_ws:
             return
         payload = json.dumps({"type": "cry", "confidence": round(confidence, 3)})
-        dead = set()
+        dead: set[WebSocket] = set()
         for ws in list(connected_ws):
             try:
                 await ws.send_text(payload)
@@ -134,7 +182,6 @@ def create_app(cfg: "CameraConfig", recorder: "Recorder") -> FastAPI:
                 dead.add(ws)
         connected_ws -= dead
 
-    # Expose broadcaster so camera_node can call it
     app.state.broadcast_alert = broadcast_alert
 
     return app

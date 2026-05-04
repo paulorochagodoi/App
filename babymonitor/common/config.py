@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
@@ -36,6 +37,8 @@ class StreamingConfig:
 @dataclass
 class RecordingsConfig:
     output_dir: str = "/opt/babymonitor/recordings"
+    max_recordings: int = 50       # oldest are deleted when exceeded
+    min_free_mb: int = 500         # refuse recording below this free space
 
 
 @dataclass
@@ -44,6 +47,12 @@ class CryDetectorConfig:
     chunk_size: int = 2048
     threshold: float = 0.65
     silence_timeout: int = 10
+    calibrate_on_start: bool = True   # sample ambient noise before detecting
+
+
+@dataclass
+class SecurityConfig:
+    api_token: str = ""   # if non-empty, POST endpoints require X-Api-Token header
 
 
 @dataclass
@@ -54,6 +63,7 @@ class CameraConfig:
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
     recordings: RecordingsConfig = field(default_factory=RecordingsConfig)
     cry_detector: CryDetectorConfig = field(default_factory=CryDetectorConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
 
 
 @dataclass
@@ -64,16 +74,16 @@ class MonitorConfig:
     default_camera_url: str = "http://10.42.0.1:8080"
 
 
-def _merge(dataclass_instance, data: dict):
+def _merge(instance, data: dict) -> None:
+    """Recursively overlay dict values onto a dataclass instance."""
     for key, value in data.items():
-        if not hasattr(dataclass_instance, key):
+        if not hasattr(instance, key):
             continue
-        attr = getattr(dataclass_instance, key)
-        if isinstance(attr, (APConfig, WifiCredentials, ServerConfig,
-                              StreamingConfig, RecordingsConfig, CryDetectorConfig)):
+        attr = getattr(instance, key)
+        if dataclasses.is_dataclass(attr) and isinstance(value, dict):
             _merge(attr, value)
         else:
-            setattr(dataclass_instance, key, value)
+            setattr(instance, key, value)
 
 
 def load_camera_config(path: str) -> CameraConfig:
@@ -104,12 +114,18 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "hls_target_duration": cfg.streaming.hls_target_duration,
             "hls_max_files": cfg.streaming.hls_max_files,
         },
-        "recordings": {"output_dir": cfg.recordings.output_dir},
+        "recordings": {
+            "output_dir": cfg.recordings.output_dir,
+            "max_recordings": cfg.recordings.max_recordings,
+            "min_free_mb": cfg.recordings.min_free_mb,
+        },
         "cry_detector": {
             "sample_rate": cfg.cry_detector.sample_rate,
             "chunk_size": cfg.cry_detector.chunk_size,
             "threshold": cfg.cry_detector.threshold,
             "silence_timeout": cfg.cry_detector.silence_timeout,
+            "calibrate_on_start": cfg.cry_detector.calibrate_on_start,
         },
+        "security": {"api_token": cfg.security.api_token},
     }
     Path(path).write_text(yaml.safe_dump(data, allow_unicode=True))

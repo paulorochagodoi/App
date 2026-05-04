@@ -27,7 +27,7 @@ class CryDetector:
         chunk_size: int = 2048,
         threshold: float = 0.65,
         silence_timeout: int = 10,
-    ):
+    ) -> None:
         self._rate = sample_rate
         self._chunk = chunk_size
         self._threshold = threshold
@@ -38,6 +38,47 @@ class CryDetector:
         self._on_silence: Callable[[], None] | None = None
         self._crying = False
         self._silence_counter = 0
+
+    def calibrate(self, duration_s: float = 5.0) -> float | None:
+        """
+        Sample ambient noise and raise threshold if the environment is noisy.
+        Returns measured baseline RMS, or None if pyaudio is unavailable.
+        """
+        if not PYAUDIO_AVAILABLE:
+            return None
+        log.info("Calibrating cry detector (%.0fs ambient sample)...", duration_s)
+        pa = pyaudio.PyAudio()
+        try:
+            stream = pa.open(
+                format=pyaudio.paFloat32, channels=1, rate=self._rate,
+                input=True, frames_per_buffer=self._chunk,
+            )
+            rms_samples: list[float] = []
+            n_chunks = max(1, int(duration_s * self._rate / self._chunk))
+            for _ in range(n_chunks):
+                data = stream.read(self._chunk, exception_on_overflow=False)
+                chunk = np.frombuffer(data, dtype=np.float32)
+                rms_samples.append(float(np.sqrt(np.mean(chunk ** 2))))
+            stream.stop_stream()
+            stream.close()
+        finally:
+            pa.terminate()
+
+        baseline = float(np.mean(rms_samples)) if rms_samples else 0.0
+        # Threshold must be at least 3× the ambient baseline (capped at 0.95)
+        adaptive = min(baseline * 3.0, 0.95)
+        if adaptive > self._threshold:
+            log.info(
+                "Threshold raised by calibration: %.3f → %.3f (ambient RMS=%.4f)",
+                self._threshold, adaptive, baseline,
+            )
+            self._threshold = adaptive
+        else:
+            log.info(
+                "Calibration complete — threshold unchanged at %.3f (ambient RMS=%.4f)",
+                self._threshold, baseline,
+            )
+        return baseline
 
     def start(
         self,
@@ -58,6 +99,9 @@ class CryDetector:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=3)
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
         pa = pyaudio.PyAudio()
@@ -115,7 +159,7 @@ class CryDetector:
 
         spectral_score = min(cry_band / total_energy * 2.0, 1.0)
 
-        # Penalise if most energy is outside cry band (e.g. broadband noise)
+        # Penalise broadband noise (e.g. white noise, fan) that is not cry-like
         noise_ratio = upper_band / (cry_band + 1e-10)
         if noise_ratio > 1.5:
             spectral_score *= 0.5

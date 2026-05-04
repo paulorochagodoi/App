@@ -1,10 +1,23 @@
 'use strict';
 
+// ── Config injected by server ──────────────────────────────────────────────
+const API_TOKEN = document.querySelector('meta[name="api-token"]')?.content || '';
+
 // ── State ──────────────────────────────────────────────────────────────────
 let isRecording = false;
 let alertDismissed = false;
 let alertTimeout = null;
 let hls = null;
+let wsRetryDelay = 1000;
+const WS_MAX_DELAY = 30000;
+
+// ── Authenticated fetch ────────────────────────────────────────────────────
+function apiFetch(url, opts = {}) {
+  if (API_TOKEN) {
+    opts.headers = { ...(opts.headers || {}), 'X-Api-Token': API_TOKEN };
+  }
+  return fetch(url, opts);
+}
 
 // ── Screen navigation ──────────────────────────────────────────────────────
 function showScreen(name) {
@@ -62,13 +75,13 @@ async function toggleRecording() {
   const btn = document.getElementById('rec-btn');
   try {
     if (!isRecording) {
-      const res = await fetch('/api/recording/start', { method: 'POST' });
+      const res = await apiFetch('/api/recording/start', { method: 'POST' });
       if (!res.ok) throw new Error(await res.text());
       isRecording = true;
       btn.textContent = '⏹ PARAR';
       btn.classList.add('recording');
     } else {
-      await fetch('/api/recording/stop', { method: 'POST' });
+      await apiFetch('/api/recording/stop', { method: 'POST' });
       isRecording = false;
       btn.textContent = '⏺ GRAVAR';
       btn.classList.remove('recording');
@@ -83,22 +96,25 @@ async function loadRecordings() {
   const list = document.getElementById('recordings-list');
   list.innerHTML = '<div class="empty-list">Carregando...</div>';
   try {
-    const res = await fetch('/api/recordings');
+    const res = await apiFetch('/api/recordings');
     const data = await res.json();
     const items = data.recordings || [];
     if (items.length === 0) {
       list.innerHTML = '<div class="empty-list">Nenhuma gravação encontrada</div>';
       return;
     }
-    list.innerHTML = items.map(r => `
-      <div class="rec-item">
-        <div class="rec-info">
-          <div class="rec-name">${r.filename}</div>
-          <div class="rec-meta">${formatDate(r.created)} · ${formatSize(r.size)}</div>
-        </div>
-        <button class="btn btn-play" onclick="playRecording('${r.filename}')">▶ Reproduzir</button>
-      </div>
-    `).join('');
+    list.innerHTML = items.map(r => {
+      const meta = [formatDate(r.created), formatSize(r.size)];
+      if (r.duration_s != null) meta.push(formatDuration(r.duration_s));
+      return `
+        <div class="rec-item">
+          <div class="rec-info">
+            <div class="rec-name">${r.filename}</div>
+            <div class="rec-meta">${meta.join(' · ')}</div>
+          </div>
+          <button class="btn btn-play" onclick="playRecording('${r.filename}')">▶ Reproduzir</button>
+        </div>`;
+    }).join('');
   } catch (e) {
     list.innerHTML = '<div class="empty-list">Erro ao carregar gravações</div>';
   }
@@ -129,7 +145,7 @@ async function saveWifi() {
   status.className = 'wifi-status';
 
   try {
-    const res = await fetch('/api/wifi/configure', {
+    const res = await apiFetch('/api/wifi/configure', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ssid, password }),
@@ -165,10 +181,15 @@ function dismissAlert() {
   setTimeout(() => { alertDismissed = false; }, 30000);
 }
 
-// ── WebSocket for cry alerts ───────────────────────────────────────────────
+// ── WebSocket for cry alerts (exponential backoff) ─────────────────────────
 function connectWebSocket() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${proto}//${location.host}/ws/alerts`);
+
+  ws.onopen = () => {
+    wsRetryDelay = 1000;  // reset on successful connection
+    setConnectionStatus(true);
+  };
 
   ws.onmessage = (e) => {
     try {
@@ -177,8 +198,21 @@ function connectWebSocket() {
     } catch (_) {}
   };
 
-  ws.onclose = () => setTimeout(connectWebSocket, 3000);
+  ws.onclose = () => {
+    setConnectionStatus(false);
+    setTimeout(connectWebSocket, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 2, WS_MAX_DELAY);
+  };
+
   ws.onerror = () => ws.close();
+}
+
+function setConnectionStatus(connected) {
+  const dot = document.getElementById('live-indicator');
+  if (dot) {
+    dot.textContent = connected ? '● AO VIVO' : '○ RECONECTANDO';
+    dot.classList.toggle('disconnected', !connected);
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -196,13 +230,24 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function formatDuration(s) {
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   startHls();
   connectWebSocket();
 
-  // Sync recording state on load
-  fetch('/api/status').then(r => r.json()).then(data => {
+  // Register service worker for offline asset caching
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+
+  // Sync recording state with server on load
+  apiFetch('/api/status').then(r => r.json()).then(data => {
     if (data.recording) {
       isRecording = true;
       const btn = document.getElementById('rec-btn');
