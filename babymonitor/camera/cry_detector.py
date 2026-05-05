@@ -53,7 +53,13 @@ class CryDetector:
                 format=pyaudio.paFloat32, channels=1, rate=self._rate,
                 input=True, frames_per_buffer=self._chunk,
             )
-            rms_samples: list[float] = []
+        except OSError as exc:
+            pa.terminate()
+            log.warning("Cry detector calibration skipped — no audio input device: %s", exc)
+            return None
+
+        rms_samples: list[float] = []
+        try:
             n_chunks = max(1, int(duration_s * self._rate / self._chunk))
             for _ in range(n_chunks):
                 data = stream.read(self._chunk, exception_on_overflow=False)
@@ -105,13 +111,18 @@ class CryDetector:
 
     def _run(self) -> None:
         pa = pyaudio.PyAudio()
-        stream = pa.open(
-            format=pyaudio.paFloat32,
-            channels=1,
-            rate=self._rate,
-            input=True,
-            frames_per_buffer=self._chunk,
-        )
+        try:
+            stream = pa.open(
+                format=pyaudio.paFloat32,
+                channels=1,
+                rate=self._rate,
+                input=True,
+                frames_per_buffer=self._chunk,
+            )
+        except OSError as exc:
+            pa.terminate()
+            log.warning("Cry detector disabled — no audio input device: %s", exc)
+            return
         buffer = np.zeros(self._rate * 2, dtype=np.float32)  # 2s ring buffer
 
         try:
