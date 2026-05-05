@@ -21,10 +21,21 @@ except (ImportError, ValueError) as _gst_err:
     )
 
 
+def _detect_camera_source() -> str:
+    """Return 'libcamerasrc' if available, else fall back to 'v4l2src'."""
+    if Gst.ElementFactory.find("libcamerasrc"):
+        return "libcamerasrc"
+    log.warning(
+        "libcamerasrc not found (install gstreamer1.0-libcamera); falling back to v4l2src. "
+        "Run: sudo apt-get install gstreamer1.0-libcamera"
+    )
+    return "v4l2src"
+
+
 class CameraStream:
     """
     GStreamer pipeline:
-      libcamerasrc → videoconvert → tee
+      libcamerasrc (or v4l2src) → videoconvert → tee
         branch A: v4l2h264enc → h264parse → hlssink2   (live HLS)
         branch B: v4l2h264enc → h264parse → mp4mux → filesink  (recording, dynamic)
     """
@@ -34,6 +45,7 @@ class CameraStream:
             raise RuntimeError(_GST_ERROR)
         self._scfg = streaming
         self._rcfg = recordings
+        self._camera_src = _detect_camera_source()
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
@@ -72,8 +84,13 @@ class CameraStream:
         dur = self._scfg.hls_target_duration
         maxf = self._scfg.hls_max_files
 
+        if self._camera_src == "v4l2src":
+            src_str = "v4l2src device=/dev/video0"
+        else:
+            src_str = "libcamerasrc"
+
         return (
-            f"libcamerasrc "
+            f"{src_str} "
             f"! video/x-raw,width={w},height={h},framerate={fps}/1 "
             f"! videoconvert "
             f"! tee name=t "
