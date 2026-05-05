@@ -13,6 +13,9 @@ apt-get update -q
 apt-get install -y \
     python3-pip \
     python3-gi \
+    python3-gst-1.0 \
+    gir1.2-gstreamer-1.0 \
+    gir1.2-gst-plugins-base-1.0 \
     python3-picamera2 \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
