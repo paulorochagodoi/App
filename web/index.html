@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="api-token" content="__API_TOKEN__">
+  <meta name="theme-color" content="#121212">
+  <title>Babá Eletrônica</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Cry alert overlay -->
+  <div id="cry-alert" class="cry-overlay hidden">
+    <span id="cry-text">CHORO DETECTADO</span>
+    <button id="cry-dismiss" onclick="dismissAlert()">✕</button>
+  </div>
+
+  <!-- Top status bar -->
+  <header class="status-bar">
+    <span id="live-indicator" class="live-dot">● AO VIVO</span>
+    <button id="rec-btn" class="btn btn-rec" onclick="toggleRecording()">⏺ GRAVAR</button>
+  </header>
+
+  <!-- Screens -->
+  <main id="screen-live" class="screen active">
+    <video id="live-video" autoplay muted playsinline></video>
+    <div id="stream-error" class="stream-error hidden">
+      <p>Aguardando stream...</p>
+    </div>
+  </main>
+
+  <main id="screen-recordings" class="screen hidden">
+    <div class="screen-header">
+      <h2>Gravações</h2>
+    </div>
+    <div id="recordings-list" class="scroll-list"></div>
+  </main>
+
+  <main id="screen-playback" class="screen hidden">
+    <div class="screen-header">
+      <button class="btn btn-back" onclick="showScreen('recordings')">← Voltar</button>
+      <span id="playback-title"></span>
+    </div>
+    <video id="playback-video" controls playsinline></video>
+  </main>
+
+  <main id="screen-wifi" class="screen hidden">
+    <div class="screen-header">
+      <h2>Configurar WiFi</h2>
+    </div>
+    <div class="wifi-form">
+      <label for="wifi-ssid">Rede (SSID)</label>
+      <input type="text" id="wifi-ssid" placeholder="Nome da rede" autocomplete="off">
+      <label for="wifi-pwd">Senha</label>
+      <input type="password" id="wifi-pwd" placeholder="Senha da rede" autocomplete="off">
+      <button class="btn btn-save" onclick="saveWifi()">💾 Salvar</button>
+      <p id="wifi-status" class="wifi-status"></p>
+    </div>
+  </main>
+
+  <!-- Tab bar -->
+  <nav class="tab-bar">
+    <button class="tab active" data-screen="live" onclick="showScreen('live')">📷 AO VIVO</button>
+    <button class="tab" data-screen="recordings" onclick="showScreen('recordings')">🎞 GRAVAÇÕES</button>
+    <button class="tab" data-screen="wifi" onclick="showScreen('wifi')">⚙ WiFi</button>
+  </nav>
+
+  <script src="/static/hls.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

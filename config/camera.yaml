@@ -1,0 +1,31 @@
+node_role: camera
+
+ap:
+  ssid: BabyMonitor-AP
+  password: babymonitor123
+  ip: 10.42.0.1
+
+fallback_wifi:
+  ssid: ""
+  password: ""
+
+server:
+  host: 0.0.0.0
+  port: 8080
+
+streaming:
+  width: 1280
+  height: 720
+  framerate: 30
+  hls_dir: /tmp/hls
+  hls_target_duration: 1
+  hls_max_files: 5
+
+recordings:
+  output_dir: /opt/babymonitor/recordings
+
+cry_detector:
+  sample_rate: 16000
+  chunk_size: 2048
+  threshold: 0.65
+  silence_timeout: 10

@@ -1,0 +1,17 @@
+[Unit]
+Description=BabyMonitor Camera Node
+After=network.target NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/babymonitor
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m babymonitor.camera_node /etc/babymonitor/camera.yaml
+Restart=always
+RestartSec=5
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
