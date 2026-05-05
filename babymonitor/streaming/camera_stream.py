@@ -1,15 +1,24 @@
 from __future__ import annotations
 import os
 import threading
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst, GLib
 from babymonitor.common.config import StreamingConfig, RecordingsConfig
 from babymonitor.common.logger import get_logger
 
 log = get_logger(__name__)
 
-Gst.init(None)
+try:
+    import gi
+    gi.require_version("Gst", "1.0")
+    gi.require_version("GLib", "2.0")
+    from gi.repository import Gst, GLib
+    Gst.init(None)
+    _GST_AVAILABLE = True
+except (ImportError, ValueError) as _gst_err:
+    _GST_AVAILABLE = False
+    _GST_ERROR = (
+        f"GStreamer Python bindings not available: {_gst_err}\n"
+        "Install with: sudo apt-get install python3-gst-1.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0"
+    )
 
 
 class CameraStream:
@@ -21,6 +30,8 @@ class CameraStream:
     """
 
     def __init__(self, streaming: StreamingConfig, recordings: RecordingsConfig):
+        if not _GST_AVAILABLE:
+            raise RuntimeError(_GST_ERROR)
         self._scfg = streaming
         self._rcfg = recordings
         self._pipeline: Gst.Pipeline | None = None
