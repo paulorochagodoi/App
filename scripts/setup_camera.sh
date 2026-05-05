@@ -20,14 +20,19 @@ apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    libportaudio2 \
+    portaudio19-dev \
     libasound2-dev \
     python3-pyaudio \
     network-manager \
     avahi-daemon \
     avahi-utils
 
-# Python dependencies
-pip3 install --break-system-packages -r "${APP_DIR}/requirements.txt"
+# Python dependencies (pyaudio is already installed via apt above;
+# --no-build-isolation lets pip find the system portaudio headers if it needs to compile)
+pip3 install --break-system-packages \
+    --extra-index-url https://pypi.org/simple \
+    -r "${APP_DIR}/requirements.txt"
 
 # Download hls.js if placeholder is present
 HLS_FILE="${APP_DIR}/web/hls.min.js"
