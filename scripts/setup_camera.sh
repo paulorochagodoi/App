@@ -23,6 +23,7 @@ apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    gstreamer1.0-libcamera \
     libportaudio2 \
     portaudio19-dev \
     libasound2-dev \
