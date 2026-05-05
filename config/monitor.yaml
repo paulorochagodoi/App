@@ -1,0 +1,12 @@
+node_role: monitor
+
+fallback_wifi:
+  ssid: ""
+  password: ""
+
+camera_ap:
+  ssid: BabyMonitor-AP
+  password: babymonitor123
+
+kiosk_url_file: /etc/babymonitor/kiosk_url
+default_camera_url: http://10.42.0.1:8080
