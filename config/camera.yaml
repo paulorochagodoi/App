@@ -19,7 +19,7 @@ streaming:
   framerate: 30
   hls_dir: /tmp/hls
   hls_target_duration: 1
-  hls_max_files: 5
+  hls_max_files: 3
   # video_device: ""   # leave empty for auto-detect; set e.g. "/dev/video0" to pin a specific webcam
 
 recordings:

@@ -47,7 +47,15 @@ function startHls() {
   const src = '/stream/live.m3u8';
 
   if (Hls.isSupported()) {
-    hls = new Hls({ lowLatencyMode: true, backBufferLength: 5 });
+    hls = new Hls({
+      lowLatencyMode: true,
+      backBufferLength: 0,
+      maxBufferLength: 4,
+      maxMaxBufferLength: 8,
+      liveSyncDuration: 2,
+      liveMaxLatencyDuration: 5,
+      liveDurationInfinity: true,
+    });
     hls.loadSource(src);
     hls.attachMedia(video);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -112,7 +120,7 @@ async function loadRecordings() {
       list.innerHTML = '<div class="empty-list">Nenhuma gravação encontrada</div>';
       return;
     }
-    list.innerHTML = items.map(r => {
+    list.innerHTML = items.map((r, i) => {
       const meta = [formatDate(r.created), formatSize(r.size)];
       if (r.duration_s != null) meta.push(formatDuration(r.duration_s));
       return `
@@ -121,9 +129,12 @@ async function loadRecordings() {
             <div class="rec-name">${r.filename}</div>
             <div class="rec-meta">${meta.join(' · ')}</div>
           </div>
-          <button class="btn btn-play" onclick="playRecording('${r.filename}')">▶ Reproduzir</button>
+          <button class="btn btn-play" data-idx="${i}">▶ Reproduzir</button>
         </div>`;
     }).join('');
+    list.querySelectorAll('.btn-play').forEach(btn => {
+      btn.addEventListener('click', () => playRecording(items[+btn.dataset.idx].filename));
+    });
   } catch (e) {
     list.innerHTML = '<div class="empty-list">Erro ao carregar gravações</div>';
   }
