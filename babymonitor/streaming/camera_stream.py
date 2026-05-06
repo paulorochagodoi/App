@@ -23,17 +23,16 @@ except (ImportError, ValueError) as _gst_err:
 
 
 def _find_v4l2_device() -> str | None:
-    """Return the first /dev/video* node that reports V4L2_CAP_VIDEO_CAPTURE."""
-    import fcntl, struct
-    VIDIOC_QUERYCAP = 0x80685600
-    # v4l2_capability layout: driver[16] + card[32] + bus_info[32] + version[4] + capabilities[4] ...
-    CAPS_OFFSET = 84  # byte offset of the capabilities field
+    """Return the first /dev/video* node that supports video capture, or None."""
     for path in sorted(glob.glob("/dev/video*")):
         try:
+            # Check capabilities via ioctl VIDIOC_QUERYCAP (capability flag 0x1 = V4L2_CAP_VIDEO_CAPTURE)
+            import fcntl, struct
+            VIDIOC_QUERYCAP = 0x80685600
             with open(path, "rb") as f:
                 buf = b"\x00" * 104
                 result = fcntl.ioctl(f, VIDIOC_QUERYCAP, buf)
-            caps = struct.unpack_from("<I", result, CAPS_OFFSET)[0]
+            caps = struct.unpack_from("<I", result, 20)[0]
             if caps & 0x1:  # V4L2_CAP_VIDEO_CAPTURE
                 log.info("Found V4L2 capture device: %s", path)
                 return path
@@ -80,35 +79,25 @@ def _detect_camera_source(video_device: str = "") -> tuple[str, str]:
 
 
 def _detect_h264_encoder() -> str:
-    """Return the best available H.264 GStreamer encoder element name."""
+    """Return best available H.264 encoder element name."""
     for enc in ("v4l2h264enc", "x264enc", "openh264enc"):
         if Gst.ElementFactory.find(enc):
             log.info("Using H.264 encoder: %s", enc)
             return enc
     raise RuntimeError(
-        "No H.264 encoder found. Install one:\n"
-        "  Hardware (Pi): built-in v4l2h264enc\n"
-        "  Software:      sudo apt-get install gstreamer1.0-plugins-ugly   # x264enc\n"
-        "                 sudo apt-get install gstreamer1.0-plugins-bad     # openh264enc"
+        "No H.264 encoder found. Install one of: "
+        "gstreamer1.0-plugins-good (x264enc) or gstreamer1.0-plugins-ugly"
     )
 
 
-def _webcam_caps_prefix(device: str, width: int, height: int, framerate: int) -> str:
+def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> str:
     """
-    Build the GStreamer source segment for a V4L2 webcam.
+    Build GStreamer source + caps string for a V4L2 webcam.
 
-    Probes whether the device advertises MJPEG capability and inserts jpegdec
-    when needed. Falls back to raw YUV if probing fails or MJPEG is absent.
-    videoscale + videorate normalize the resolution/framerate to the configured values.
+    Webcams expose either raw (YUYV/NV12) or MJPEG frames. We probe for MJPEG
+    first (higher resolution, less USB bandwidth) and fall back to raw.
     """
-    raw_prefix = (
-        f"v4l2src device={device} "
-        f"! videoconvert "
-        f"! videoscale "
-        f"! videorate "
-        f"! video/x-raw,width={width},height={height},framerate={framerate}/1"
-    )
-    mjpeg_prefix = (
+    mjpeg_probe = (
         f"v4l2src device={device} "
         f"! image/jpeg,width={width},height={height},framerate={framerate}/1 "
         f"! jpegdec "
@@ -117,7 +106,16 @@ def _webcam_caps_prefix(device: str, width: int, height: int, framerate: int) ->
         f"! videorate "
         f"! video/x-raw,width={width},height={height},framerate={framerate}/1"
     )
+    raw_probe = (
+        f"v4l2src device={device} "
+        f"! videoconvert "
+        f"! videoscale "
+        f"! videorate "
+        f"! video/x-raw,width={width},height={height},framerate={framerate}/1"
+    )
 
+    # Check if device exposes MJPEG capability via v4l2-ctl / sysfs
+    # We use GStreamer's device monitor as a lightweight probe.
     try:
         monitor = Gst.DeviceMonitor.new()
         monitor.add_filter("Video/Source", None)
@@ -127,15 +125,17 @@ def _webcam_caps_prefix(device: str, width: int, height: int, framerate: int) ->
         for dev in devices:
             props = dev.get_properties()
             if props and device in (props.get_string("device.path") or ""):
-                caps_str = dev.get_caps().to_string() if dev.get_caps() else ""
-                if "image/jpeg" in caps_str:
-                    log.info("Webcam %s supports MJPEG — using jpegdec path", device)
-                    return mjpeg_prefix
+                caps = dev.get_caps()
+                if caps:
+                    caps_str = caps.to_string()
+                    if "image/jpeg" in caps_str:
+                        log.info("Webcam %s supports MJPEG — using jpegdec path", device)
+                        return mjpeg_probe
     except Exception as exc:
-        log.debug("Device monitor probe skipped (%s)", exc)
+        log.debug("Device monitor probe failed (%s); defaulting to raw path", exc)
 
-    log.info("Webcam %s: using raw YUV path (videoconvert + videoscale + videorate)", device)
-    return raw_prefix
+    log.info("Webcam %s: using raw YUV path", device)
+    return raw_probe
 
 
 class CameraStream:
@@ -146,10 +146,10 @@ class CameraStream:
         branch B: <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
 
     Webcam support:
-      - Auto-detects libcamerasrc (Pi Camera) vs. V4L2 (USB webcam) via ioctl scan
-      - Handles MJPEG-outputting webcams via jpegdec (detected with DeviceMonitor)
-      - Normalizes resolution/framerate with videoscale + videorate
-      - Encoder fallback: v4l2h264enc → x264enc → openh264enc
+      - Auto-detects libcamerasrc (Pi Camera Module) vs. V4L2 (USB webcam)
+      - Scans /dev/video* for a capture-capable device when no explicit path is configured
+      - Handles MJPEG-outputting webcams transparently via jpegdec
+      - Falls back from v4l2h264enc to x264enc / openh264enc when hardware encoder absent
     """
 
     def __init__(self, streaming: StreamingConfig, recordings: RecordingsConfig):
@@ -169,20 +169,6 @@ class CameraStream:
         self._pipeline_error: str | None = None
         os.makedirs(streaming.hls_dir, exist_ok=True)
         os.makedirs(recordings.output_dir, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Diagnostics
-    # ------------------------------------------------------------------
-
-    @property
-    def source_info(self) -> dict:
-        return {
-            "type": self._camera_src,
-            "device": self._device or "N/A",
-            "encoder": self._encoder,
-            "running": self._pipeline_running,
-            "error": self._pipeline_error,
-        }
 
     # ------------------------------------------------------------------
     # Public API
@@ -238,14 +224,9 @@ class CameraStream:
                 f"! videoconvert"
             )
         else:
-            src_str = _webcam_caps_prefix(self._device, w, h, fps)
+            src_str = _webcam_input_caps(self._device, w, h, fps)
 
-        if self._encoder == "v4l2h264enc":
-            enc_opts = 'extra-controls="controls,repeat_sequence_header=1"'
-        elif self._encoder == "x264enc":
-            enc_opts = "tune=zerolatency"
-        else:
-            enc_opts = ""
+        enc_opts = 'extra-controls="controls,repeat_sequence_header=1"' if self._encoder == "v4l2h264enc" else "tune=zerolatency" if self._encoder == "x264enc" else ""
 
         return (
             f"{src_str} "
@@ -287,7 +268,11 @@ class CameraStream:
             queue.set_property("max-size-buffers", 200)
             queue.set_property("leaky", 2)  # downstream
 
-            if self._encoder == "x264enc":
+            if self._encoder == "v4l2h264enc":
+                enc.set_property("extra-controls", Gst.Structure.new_from_string(
+                    "controls,repeat_sequence_header=1"
+                ))
+            elif self._encoder == "x264enc":
                 enc.set_property("tune", 4)  # zerolatency
 
             elements = [queue, enc, parse, mux, sink]
