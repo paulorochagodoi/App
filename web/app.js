@@ -47,7 +47,15 @@ function startHls() {
   const src = '/stream/live.m3u8';
 
   if (Hls.isSupported()) {
-    hls = new Hls({ lowLatencyMode: true, backBufferLength: 5 });
+    hls = new Hls({
+      lowLatencyMode: true,
+      backBufferLength: 0,
+      maxBufferLength: 4,
+      maxMaxBufferLength: 8,
+      liveSyncDuration: 2,
+      liveMaxLatencyDuration: 5,
+      liveDurationInfinity: true,
+    });
     hls.loadSource(src);
     hls.attachMedia(video);
     hls.on(Hls.Events.MANIFEST_PARSED, () => {

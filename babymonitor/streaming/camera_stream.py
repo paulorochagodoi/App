@@ -232,17 +232,24 @@ class CameraStream:
         else:
             src_str = _webcam_input_caps(self._device, w, h, fps)
 
-        enc_opts = 'extra-controls="controls,repeat_sequence_header=1"' if self._encoder == "v4l2h264enc" else "tune=zerolatency" if self._encoder == "x264enc" else ""
+        enc_opts = (
+            'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period=30"'
+            if self._encoder == "v4l2h264enc"
+            else "tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=1500"
+            if self._encoder == "x264enc"
+            else ""
+        )
 
         return (
             f"{src_str} "
             f"! tee name=t "
-            f"  t. ! queue max-size-buffers=200 leaky=downstream "
+            f"  t. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
             f"       ! {self._encoder} {enc_opts} "
             f"       ! h264parse "
             f"       ! hlssink2 name=hlssink "
             f"           target-duration={dur} "
             f"           max-files={maxf} "
+            f"           send-keyframe-requests=true "
             f"           location={hls_dir}/seg%05d.ts "
             f"           playlist-location={hls_dir}/live.m3u8 "
             f"           playlist-root=. "
