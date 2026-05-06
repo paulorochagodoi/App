@@ -78,16 +78,16 @@ def _detect_camera_source(video_device: str = "") -> tuple[str, str]:
     return "v4l2src", "/dev/video0"
 
 
-def _detect_h264_encoder() -> str:
-    """Return best available H.264 encoder element name."""
-    for enc in ("v4l2h264enc", "x264enc", "openh264enc"):
-        if Gst.ElementFactory.find(enc):
-            log.info("Using H.264 encoder: %s", enc)
-            return enc
-    raise RuntimeError(
-        "No H.264 encoder found. Install one of: "
-        "gstreamer1.0-plugins-good (x264enc) or gstreamer1.0-plugins-ugly"
-    )
+def _detect_h264_encoders() -> list[str]:
+    """Return all available H.264 encoders in priority order."""
+    available = [enc for enc in ("v4l2h264enc", "x264enc", "openh264enc") if Gst.ElementFactory.find(enc)]
+    if not available:
+        raise RuntimeError(
+            "No H.264 encoder found. Install one of: "
+            "gstreamer1.0-plugins-good (x264enc) or gstreamer1.0-plugins-ugly"
+        )
+    log.info("Available H.264 encoders: %s", available)
+    return available
 
 
 def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> str:
@@ -158,7 +158,8 @@ class CameraStream:
         self._scfg = streaming
         self._rcfg = recordings
         self._camera_src, self._device = _detect_camera_source(streaming.video_device)
-        self._encoder = _detect_h264_encoder()
+        self._encoder_candidates = _detect_h264_encoders()
+        self._encoder = self._encoder_candidates[0]
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
@@ -175,8 +176,17 @@ class CameraStream:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
+        self._loop = GLib.MainLoop()
+        self._thread = threading.Thread(target=self._loop.run, daemon=True)
+        self._thread.start()
+        self._launch_pipeline()
+
+    def _launch_pipeline(self) -> None:
         pipeline_str = self._build_pipeline()
-        log.info("Launching GStreamer pipeline:\n%s", pipeline_str)
+        log.info(
+            "Launching GStreamer pipeline (encoder=%s):\n%s",
+            self._encoder, pipeline_str,
+        )
         self._pipeline = Gst.parse_launch(pipeline_str)
         self._tee = self._pipeline.get_by_name("t")
 
@@ -190,14 +200,10 @@ class CameraStream:
             log.error(self._pipeline_error)
         else:
             self._pipeline_running = True
-
-        self._loop = GLib.MainLoop()
-        self._thread = threading.Thread(target=self._loop.run, daemon=True)
-        self._thread.start()
-        log.info(
-            "Camera stream starting — source=%s device=%s encoder=%s hls_dir=%s",
-            self._camera_src, self._device or "N/A", self._encoder, self._scfg.hls_dir,
-        )
+            log.info(
+                "Camera stream started — source=%s device=%s encoder=%s hls_dir=%s",
+                self._camera_src, self._device or "N/A", self._encoder, self._scfg.hls_dir,
+            )
 
     def stop(self) -> None:
         if self._pipeline:
@@ -314,17 +320,45 @@ class CameraStream:
             log.info("Recording stopped")
 
     # ------------------------------------------------------------------
-    # Bus messages
+    # Bus messages & encoder fallback
     # ------------------------------------------------------------------
 
     def _on_bus_message(self, bus: Gst.Bus, message: Gst.Message) -> None:
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
+            log.error("GStreamer pipeline error: %s\nDebug: %s", err, debug)
+            if self._try_next_encoder():
+                GLib.idle_add(self._restart_pipeline)
+                return
             self._pipeline_error = str(err)
             self._pipeline_running = False
-            log.error("GStreamer pipeline error: %s\nDebug: %s", err, debug)
             if self._loop:
                 self._loop.quit()
         elif message.type == Gst.MessageType.EOS:
             self._pipeline_running = False
             log.info("GStreamer EOS")
+
+    def _try_next_encoder(self) -> bool:
+        """Advance to the next encoder candidate. Returns True if one is available."""
+        try:
+            idx = self._encoder_candidates.index(self._encoder)
+        except ValueError:
+            return False
+        if idx + 1 < len(self._encoder_candidates):
+            old = self._encoder
+            self._encoder = self._encoder_candidates[idx + 1]
+            log.warning("Encoder %s failed — retrying with %s", old, self._encoder)
+            return True
+        return False
+
+    def _restart_pipeline(self) -> bool:
+        """Tear down the current pipeline and relaunch with the updated encoder. GLib idle callback."""
+        self._pipeline_running = False
+        if self._pipeline:
+            self._pipeline.set_state(Gst.State.NULL)
+            bus = self._pipeline.get_bus()
+            bus.remove_signal_watch()
+            self._pipeline = None
+            self._tee = None
+        self._launch_pipeline()
+        return False  # remove from GLib idle sources
