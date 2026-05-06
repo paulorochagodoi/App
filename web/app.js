@@ -8,6 +8,7 @@ let isRecording = false;
 let alertDismissed = false;
 let alertTimeout = null;
 let hls = null;
+let hlsRetryTimer = null;
 let wsRetryDelay = 1000;
 const WS_MAX_DELAY = 30000;
 
@@ -38,6 +39,9 @@ function startHls() {
   const video = document.getElementById('live-video');
   const errorEl = document.getElementById('stream-error');
 
+  clearTimeout(hlsRetryTimer);
+  hlsRetryTimer = null;
+
   if (hls) { hls.destroy(); hls = null; }
 
   const src = '/stream/live.m3u8';
@@ -53,17 +57,22 @@ function startHls() {
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
         errorEl.classList.remove('hidden');
-        setTimeout(startHls, 3000);
+        hlsRetryTimer = setTimeout(startHls, 3000);
       }
     });
   } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
     // Safari / iOS native HLS
+    video.removeAttribute('src');
+    video.load();
     video.src = src;
-    video.addEventListener('loadedmetadata', () => video.play().catch(() => {}));
+    video.addEventListener('loadedmetadata', () => {
+      video.play().catch(() => {});
+      errorEl.classList.add('hidden');
+    }, { once: true });
     video.addEventListener('error', () => {
       errorEl.classList.remove('hidden');
-      setTimeout(startHls, 3000);
-    });
+      hlsRetryTimer = setTimeout(startHls, 3000);
+    }, { once: true });
   } else {
     errorEl.querySelector('p').textContent = 'Navegador não suporta HLS.';
     errorEl.classList.remove('hidden');
