@@ -29,6 +29,7 @@ def create_app(
     cfg: "CameraConfig",
     recorder: "Recorder",
     cry_detector: "CryDetector | None" = None,
+    stream: "object | None" = None,
 ) -> FastAPI:
     app = FastAPI(title="BabyMonitor API")
     connected_ws: set[WebSocket] = set()
@@ -146,9 +147,11 @@ def create_app(
             disk = {"free_gb": None, "used_pct": None}
 
         stream_ok = hls_exists and hls_fresh
+        camera_info = stream.source_info if stream and hasattr(stream, "source_info") else {}
         return {
             "status": "ok" if stream_ok else "degraded",
             "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
+            "camera": camera_info,
             "detector": {"running": cry_detector.is_running() if cry_detector else False},
             "recording": recorder.is_recording(),
             "disk": disk,

@@ -165,6 +165,8 @@ class CameraStream:
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
         self._rec_lock = threading.Lock()
+        self._pipeline_running = False
+        self._pipeline_error: str | None = None
         os.makedirs(streaming.hls_dir, exist_ok=True)
         os.makedirs(recordings.output_dir, exist_ok=True)
 
@@ -182,17 +184,27 @@ class CameraStream:
         bus.add_signal_watch()
         bus.connect("message", self._on_bus_message)
 
-        self._pipeline.set_state(Gst.State.PLAYING)
+        ret = self._pipeline.set_state(Gst.State.PLAYING)
+        if ret == Gst.StateChangeReturn.FAILURE:
+            self._pipeline_error = "Pipeline failed to enter PLAYING state"
+            log.error(self._pipeline_error)
+        else:
+            self._pipeline_running = True
+
         self._loop = GLib.MainLoop()
         self._thread = threading.Thread(target=self._loop.run, daemon=True)
         self._thread.start()
-        log.info("Camera stream started (HLS → %s)", self._scfg.hls_dir)
+        log.info(
+            "Camera stream starting — source=%s device=%s encoder=%s hls_dir=%s",
+            self._camera_src, self._device or "N/A", self._encoder, self._scfg.hls_dir,
+        )
 
     def stop(self) -> None:
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
         if self._loop:
             self._loop.quit()
+        self._pipeline_running = False
         log.info("Camera stream stopped")
 
     # ------------------------------------------------------------------
@@ -308,8 +320,11 @@ class CameraStream:
     def _on_bus_message(self, bus: Gst.Bus, message: Gst.Message) -> None:
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            log.error("GStreamer error: %s — %s", err, debug)
+            self._pipeline_error = str(err)
+            self._pipeline_running = False
+            log.error("GStreamer pipeline error: %s\nDebug: %s", err, debug)
             if self._loop:
                 self._loop.quit()
         elif message.type == Gst.MessageType.EOS:
+            self._pipeline_running = False
             log.info("GStreamer EOS")
