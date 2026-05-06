@@ -25,6 +25,11 @@ log = get_logger(__name__)
 WEB_DIR = Path(__file__).parent.parent.parent / "web"
 
 
+class WifiRequest(BaseModel):
+    ssid: str
+    password: str
+
+
 def create_app(
     cfg: "CameraConfig",
     recorder: "Recorder",
@@ -105,10 +110,6 @@ def create_app(
         return {"status": "stopped", "file": os.path.basename(path) if path else None}
 
     # ── WiFi config ──────────────────────────────────────────────────────────
-    class WifiRequest(BaseModel):
-        ssid: str
-        password: str
-
     @app.post("/api/wifi/configure", dependencies=[Depends(require_token)])
     async def configure_wifi(req: WifiRequest):
         from babymonitor.common.config import save_camera_config
@@ -119,7 +120,8 @@ def create_app(
             save_camera_config(cfg, config_path)
             log.info("WiFi credentials updated: ssid=%s", req.ssid)
         except OSError as e:
-            log.warning("Could not save config: %s", e)
+            log.error("Could not save config: %s", e)
+            raise HTTPException(status_code=500, detail=f"Configuração não pôde ser gravada: {e}")
         return {"status": "ok", "ssid": req.ssid}
 
     # ── Status ───────────────────────────────────────────────────────────────
