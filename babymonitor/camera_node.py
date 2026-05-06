@@ -48,7 +48,7 @@ def main() -> None:
     )
 
     # FastAPI app
-    app = create_app(cfg, recorder, cry_detector)
+    app = create_app(cfg, recorder, cry_detector, stream)
 
     # Async bridge: detector callbacks → asyncio loop
     loop = asyncio.new_event_loop()
