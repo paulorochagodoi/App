@@ -236,9 +236,24 @@ function formatDuration(s) {
   return `${m}:${String(sec).padStart(2, '0')}`;
 }
 
+// ── Stream startup: wait configured delay before first HLS attempt ─────────
+async function initStream() {
+  try {
+    const res = await fetch('/api/health');
+    const data = await res.json();
+    const delay = (data.stream?.startup_delay_s ?? 0) * 1000;
+    if (delay > 0) {
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  } catch (_) {
+    // If health check fails, proceed immediately
+  }
+  startHls();
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  startHls();
+  initStream();
   connectWebSocket();
 
   // Register service worker for offline asset caching

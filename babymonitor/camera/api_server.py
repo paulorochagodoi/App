@@ -148,7 +148,11 @@ def create_app(
         stream_ok = hls_exists and hls_fresh
         return {
             "status": "ok" if stream_ok else "degraded",
-            "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
+            "stream": {
+                "hls_ready": hls_exists,
+                "hls_fresh": hls_fresh,
+                "startup_delay_s": cfg.streaming.startup_delay_s,
+            },
             "detector": {"running": cry_detector.is_running() if cry_detector else False},
             "recording": recorder.is_recording(),
             "disk": disk,

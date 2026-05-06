@@ -32,6 +32,7 @@ class StreamingConfig:
     hls_dir: str = "/tmp/hls"
     hls_target_duration: int = 1
     hls_max_files: int = 5
+    startup_delay_s: int = 5
 
 
 @dataclass
@@ -113,6 +114,7 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "framerate": cfg.streaming.framerate, "hls_dir": cfg.streaming.hls_dir,
             "hls_target_duration": cfg.streaming.hls_target_duration,
             "hls_max_files": cfg.streaming.hls_max_files,
+            "startup_delay_s": cfg.streaming.startup_delay_s,
         },
         "recordings": {
             "output_dir": cfg.recordings.output_dir,
