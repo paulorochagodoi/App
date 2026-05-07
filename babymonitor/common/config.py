@@ -35,6 +35,7 @@ class StreamingConfig:
     video_device: str = ""   # empty = auto-detect; e.g. "/dev/video0"
     audio_device: str = ""   # empty = auto-detect; e.g. "hw:1,0"
     timestamp_overlay: bool = True
+    video_bitrate: int = 4000  # kbps for x264enc encoder
 
 
 @dataclass
@@ -119,6 +120,7 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "video_device": cfg.streaming.video_device,
             "audio_device": cfg.streaming.audio_device,
             "timestamp_overlay": cfg.streaming.timestamp_overlay,
+            "video_bitrate": cfg.streaming.video_bitrate,
         },
         "recordings": {
             "output_dir": cfg.recordings.output_dir,
