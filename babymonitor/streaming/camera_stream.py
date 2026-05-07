@@ -78,9 +78,18 @@ def _detect_camera_source(video_device: str = "") -> tuple[str, str]:
     return "v4l2src", "/dev/video0"
 
 
+def _element_available(name: str) -> bool:
+    """Return True only if the GStreamer element can actually be instantiated (plugin loads)."""
+    el = Gst.ElementFactory.make(name, None)
+    if el is None:
+        return False
+    el.set_state(Gst.State.NULL)
+    return True
+
+
 def _detect_h264_encoders() -> list[str]:
     """Return all available H.264 encoders in priority order."""
-    available = [enc for enc in ("v4l2h264enc", "x264enc", "openh264enc") if Gst.ElementFactory.find(enc)]
+    available = [enc for enc in ("v4l2h264enc", "x264enc", "openh264enc") if _element_available(enc)]
     if not available:
         raise RuntimeError(
             "No H.264 encoder found. Install one of: "
@@ -90,16 +99,66 @@ def _detect_h264_encoders() -> list[str]:
     return available
 
 
-def _detect_audio_source(audio_device: str = "") -> str | None:
+def _find_webcam_audio_device(video_device: str) -> str | None:
+    """
+    Try to find the ALSA audio device (hw:N,0) associated with a V4L2 webcam
+    by walking sysfs: /sys/class/video4linux/videoX → USB device → sound/cardN.
+    """
+    import re
+    try:
+        vdev_name = os.path.basename(video_device)
+        sysfs_video = f"/sys/class/video4linux/{vdev_name}"
+        if not os.path.exists(sysfs_video):
+            return None
+
+        real_path = os.path.realpath(sysfs_video)
+        parts = real_path.split("/")
+
+        # Walk up to the USB device node (the part before the interface, e.g. "1-1.1")
+        usb_device_path = None
+        for i, part in enumerate(parts):
+            if re.match(r"\d+-[\d.]+:\d+\.\d+", part):
+                usb_device_path = "/".join(parts[:i])
+                break
+
+        if not usb_device_path:
+            return None
+
+        # Search for sound/cardN under any interface of the same USB device
+        for card_dir in sorted(glob.glob(f"{usb_device_path}/*/sound/card*")):
+            card_num = os.path.basename(card_dir).replace("card", "")
+            if card_num.isdigit():
+                device = f"hw:{card_num},0"
+                log.info("Webcam audio device found via sysfs: %s (video=%s)", device, video_device)
+                return device
+    except Exception as exc:
+        log.debug("Webcam audio sysfs probe failed: %s", exc)
+    return None
+
+
+def _detect_audio_source(
+    audio_device: str = "",
+    video_device: str = "",
+    use_webcam_audio: bool = False,
+) -> str | None:
     """Return a GStreamer audio source element string, or None if none found."""
     if audio_device:
-        if Gst.ElementFactory.find("alsasrc"):
+        if _element_available("alsasrc"):
             log.info("Using configured ALSA audio device: %s", audio_device)
             return f"alsasrc device={audio_device}"
         log.warning("alsasrc not found; ignoring configured audio_device '%s'", audio_device)
 
+    if use_webcam_audio and video_device:
+        webcam_audio = _find_webcam_audio_device(video_device)
+        if webcam_audio and _element_available("alsasrc"):
+            return f"alsasrc device={webcam_audio}"
+        if webcam_audio:
+            log.warning("alsasrc not found; cannot use webcam audio device '%s'", webcam_audio)
+        else:
+            log.warning("use_webcam_audio=True but no audio device found for %s", video_device)
+
     for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
-        if Gst.ElementFactory.find(src):
+        if _element_available(src):
             log.info("Using audio source: %s", src)
             return src
 
@@ -110,7 +169,7 @@ def _detect_audio_source(audio_device: str = "") -> str | None:
 def _detect_aac_encoder() -> str | None:
     """Return the first available AAC encoder element name, or None."""
     for enc in ("avenc_aac", "voaacenc", "faac"):
-        if Gst.ElementFactory.find(enc):
+        if _element_available(enc):
             log.info("Using AAC encoder: %s", enc)
             return enc
     log.warning(
@@ -201,11 +260,17 @@ class CameraStream:
         self._camera_src, self._device = _detect_camera_source(streaming.video_device)
         self._encoder_candidates = _detect_h264_encoders()
         self._encoder = self._encoder_candidates[0]
-        self._audio_src = _detect_audio_source(streaming.audio_device)
+        self._audio_src = _detect_audio_source(
+            audio_device=streaming.audio_device,
+            video_device=self._device,
+            use_webcam_audio=streaming.use_webcam_audio,
+        )
         self._audio_encoder = _detect_aac_encoder() if self._audio_src else None
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
         self._enctee: Gst.Element | None = None
+        self._audiotee: Gst.Element | None = None
+        self._audio_failed = False  # set True after audio fallback to avoid retry loop
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
@@ -236,8 +301,7 @@ class CameraStream:
         try:
             self._pipeline = Gst.parse_launch(pipeline_str)
         except GLib.Error as exc:
-            # hlssink2 audio request pads require GStreamer ≥ 1.22; older builds
-            # (e.g. 1.18 on Bullseye) don't expose them, so fall back to video-only.
+            # Audio pads / tee may be unsupported on older GStreamer — fall back to video-only.
             if self._audio_src and self._audio_encoder:
                 log.warning(
                     "Pipeline with audio failed (%s) — falling back to video-only pipeline",
@@ -245,14 +309,21 @@ class CameraStream:
                 )
                 self._audio_src = None
                 self._audio_encoder = None
-                pipeline_str = self._build_pipeline()
-                self._pipeline = Gst.parse_launch(pipeline_str)
+                self._audio_failed = True
+                try:
+                    pipeline_str = self._build_pipeline()
+                    self._pipeline = Gst.parse_launch(pipeline_str)
+                except GLib.Error as exc2:
+                    self._pipeline_error = f"Failed to build video-only pipeline: {exc2}"
+                    log.error(self._pipeline_error)
+                    return
             else:
                 self._pipeline_error = f"Failed to build GStreamer pipeline: {exc}"
                 log.error(self._pipeline_error)
                 return
         self._tee = self._pipeline.get_by_name("t")
         self._enctee = self._pipeline.get_by_name("enct")
+        self._audiotee = self._pipeline.get_by_name("atee")
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
@@ -264,6 +335,7 @@ class CameraStream:
             log.error(self._pipeline_error)
         else:
             self._pipeline_running = True
+            self._pipeline_error = None  # clear any error from a previous run
             log.info(
                 "Camera stream started — source=%s device=%s encoder=%s audio=%s hls_dir=%s",
                 self._camera_src, self._device or "N/A", self._encoder,
@@ -323,10 +395,12 @@ class CameraStream:
                 f"  {self._audio_src} "
                 f"! audioconvert "
                 f"! audioresample "
-                f"! audio/x-raw,rate=44100,channels=1 "
-                f"! {self._audio_encoder} {audio_enc_opts} "
-                f"! aacparse "
-                f"! hlssink.audio_0 "
+                f"! tee name=atee "
+                f"  atee. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
+                f"        ! audio/x-raw,rate=44100,channels=1 "
+                f"        ! {self._audio_encoder} {audio_enc_opts} "
+                f"        ! aacparse "
+                f"        ! hlssink.audio_0 "
             )
 
         return (
@@ -429,6 +503,14 @@ class CameraStream:
             if self._try_next_encoder():
                 GLib.idle_add(self._restart_pipeline)
                 return
+            # Audio device failure kills the pipeline — restart video-only
+            if (self._audio_src or self._audio_encoder) and not self._audio_failed:
+                log.warning("Audio pipeline failed — restarting without audio")
+                self._audio_src = None
+                self._audio_encoder = None
+                self._audio_failed = True
+                GLib.idle_add(self._restart_pipeline)
+                return
             self._pipeline_error = str(err)
             self._pipeline_running = False
             if self._loop:
@@ -464,6 +546,7 @@ class CameraStream:
             self._pipeline = None
             self._tee = None
             self._enctee = None
+            self._audiotee = None
         self._launch_pipeline()
         return False  # remove from GLib idle sources
 
@@ -527,13 +610,55 @@ class CameraStream:
         if tee_pad:
             tee_pad.link(queue.get_static_pad("sink"))
 
+        # Audio branch — requires opusenc + rtpopuspay (gstreamer1.0-plugins-good)
+        audio_els: list[Gst.Element] = []
+        atee_pad = None
+        if (
+            self._audiotee
+            and Gst.ElementFactory.find("opusenc")
+            and Gst.ElementFactory.find("rtpopuspay")
+        ):
+            aq    = Gst.ElementFactory.make("queue",         f"wrtc_aq_{peer_id}")
+            aconv = Gst.ElementFactory.make("audioconvert",  f"wrtc_aconv_{peer_id}")
+            ares  = Gst.ElementFactory.make("audioresample", f"wrtc_ares_{peer_id}")
+            aenc  = Gst.ElementFactory.make("opusenc",       f"wrtc_aenc_{peer_id}")
+            apay  = Gst.ElementFactory.make("rtpopuspay",    f"wrtc_apay_{peer_id}")
+            acf   = Gst.ElementFactory.make("capsfilter",    f"wrtc_acf_{peer_id}")
+            if all([aq, aconv, ares, aenc, apay, acf]):
+                aq.set_property("max-size-buffers", 4)
+                aq.set_property("leaky", 2)
+                acf.set_property(
+                    "caps",
+                    Gst.Caps.from_string(
+                        "application/x-rtp,media=audio,encoding-name=OPUS,"
+                        "payload=97,clock-rate=48000"
+                    ),
+                )
+                audio_els = [aq, aconv, ares, aenc, apay, acf]
+                for el in audio_els:
+                    self._pipeline.add(el)
+                    el.sync_state_with_parent()
+                aq.link(aconv)
+                aconv.link(ares)
+                ares.link(aenc)
+                aenc.link(apay)
+                apay.link(acf)
+                acf.link(wb)
+                atee_pad = self._audiotee.get_request_pad("src_%u")
+                if atee_pad:
+                    atee_pad.link(aq.get_static_pad("sink"))
+            else:
+                log.warning("Failed to create WebRTC audio elements for peer %s", peer_id)
+
         with self._webrtc_lock:
             self._webrtc_peers[peer_id] = {
                 "elements": [queue, pay, cf, wb],
                 "tee_pad": tee_pad,
+                "audio_elements": audio_els,
+                "atee_pad": atee_pad,
             }
 
-        log.info("WebRTC peer added: %s", peer_id)
+        log.info("WebRTC peer added: %s (audio=%s)", peer_id, bool(audio_els))
         return WebRTCPeer(peer_id, wb, loop, on_send)
 
     def remove_webrtc_peer(self, peer_id: str) -> None:
@@ -542,13 +667,21 @@ class CameraStream:
         if not data:
             return
 
+        import time as _time
+
         tee_pad = data["tee_pad"]
         if tee_pad and self._enctee:
             tee_pad.send_event(Gst.Event.new_eos())
-            import time as _time; _time.sleep(0.1)
+            _time.sleep(0.1)
             self._enctee.release_request_pad(tee_pad)
 
-        for el in data["elements"]:
+        atee_pad = data.get("atee_pad")
+        if atee_pad and self._audiotee:
+            atee_pad.send_event(Gst.Event.new_eos())
+            _time.sleep(0.1)
+            self._audiotee.release_request_pad(atee_pad)
+
+        for el in data["elements"] + data.get("audio_elements", []):
             el.set_state(Gst.State.NULL)
             if self._pipeline:
                 self._pipeline.remove(el)

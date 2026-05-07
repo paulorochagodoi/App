@@ -201,6 +201,14 @@ async function startLiveStream() {
   if (!ok) startHls();
 }
 
+// ── Mute toggle ───────────────────────────────────────────────────────────
+function toggleMute() {
+  const video = document.getElementById('live-video');
+  const btn = document.getElementById('mute-btn');
+  video.muted = !video.muted;
+  btn.textContent = video.muted ? '🔇' : '🔊';
+}
+
 // ── Recording ──────────────────────────────────────────────────────────────
 async function toggleRecording() {
   const btn = document.getElementById('rec-btn');

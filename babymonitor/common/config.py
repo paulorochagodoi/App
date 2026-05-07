@@ -32,8 +32,9 @@ class StreamingConfig:
     hls_dir: str = "/tmp/hls"
     hls_target_duration: int = 1
     hls_max_files: int = 5
-    video_device: str = ""   # empty = auto-detect; e.g. "/dev/video0"
-    audio_device: str = ""   # empty = auto-detect; e.g. "hw:1,0"
+    video_device: str = ""        # empty = auto-detect; e.g. "/dev/video0"
+    audio_device: str = ""        # empty = auto-detect; e.g. "hw:1,0"
+    use_webcam_audio: bool = False  # use the webcam's built-in mic as audio source
     timestamp_overlay: bool = True
 
 
@@ -118,6 +119,7 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "hls_max_files": cfg.streaming.hls_max_files,
             "video_device": cfg.streaming.video_device,
             "audio_device": cfg.streaming.audio_device,
+            "use_webcam_audio": cfg.streaming.use_webcam_audio,
             "timestamp_overlay": cfg.streaming.timestamp_overlay,
         },
         "recordings": {
