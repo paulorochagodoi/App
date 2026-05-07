@@ -62,7 +62,6 @@ async function startWebRTC() {
     webrtcPc = pc;
 
     // Prefer H264 to match the GStreamer encoding pipeline
-    pc.addTransceiver('audio', { direction: 'recvonly' });
     const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
     if (RTCRtpReceiver.getCapabilities) {
       const caps = RTCRtpReceiver.getCapabilities('video');

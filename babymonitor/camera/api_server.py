@@ -214,9 +214,19 @@ def create_app(
         if not _WEBRTC_AVAILABLE and _WEBRTC_UNAVAILABLE_REASON:
             webrtc_info["unavailable_reason"] = _WEBRTC_UNAVAILABLE_REASON
 
+        pipeline_info: dict = {}
+        if stream:
+            pipeline_info["running"] = getattr(stream, "_pipeline_running", False)
+            pipeline_info["audio_src"] = getattr(stream, "_audio_src", None)
+            pipeline_info["audio_failed"] = getattr(stream, "_audio_failed", False)
+            err = getattr(stream, "_pipeline_error", None)
+            if err:
+                pipeline_info["error"] = err
+
         return {
             "status": "ok" if stream_ok else "degraded",
             "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
+            "pipeline": pipeline_info,
             "webrtc": webrtc_info,
             "camera": camera_info,
             "detector": {"running": cry_detector.is_running() if cry_detector else False},
