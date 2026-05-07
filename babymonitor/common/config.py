@@ -33,6 +33,7 @@ class StreamingConfig:
     hls_target_duration: int = 1
     hls_max_files: int = 5
     video_device: str = ""   # empty = auto-detect; e.g. "/dev/video0"
+    timestamp_overlay: bool = True
 
 
 @dataclass
@@ -115,6 +116,7 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "hls_target_duration": cfg.streaming.hls_target_duration,
             "hls_max_files": cfg.streaming.hls_max_files,
             "video_device": cfg.streaming.video_device,
+            "timestamp_overlay": cfg.streaming.timestamp_overlay,
         },
         "recordings": {
             "output_dir": cfg.recordings.output_dir,

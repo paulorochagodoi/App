@@ -141,7 +141,7 @@ def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> 
 class CameraStream:
     """
     GStreamer pipeline:
-      [libcamerasrc | v4l2src] → videoconvert → tee
+      [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee
         branch A: <h264enc> → h264parse → hlssink2           (live HLS)
         branch B: <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
 
@@ -240,8 +240,19 @@ class CameraStream:
             else ""
         )
 
+        overlay_str = (
+            "! clockoverlay "
+            'time-format="%d/%m/%Y %H:%M:%S" '
+            "halignment=right valignment=bottom "
+            'font-desc="Sans Bold 14" '
+            "shaded-background=true "
+            if self._scfg.timestamp_overlay
+            else ""
+        )
+
         return (
             f"{src_str} "
+            f"{overlay_str}"
             f"! tee name=t "
             f"  t. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
             f"       ! {self._encoder} {enc_opts} "
