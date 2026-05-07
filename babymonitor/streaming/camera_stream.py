@@ -301,7 +301,7 @@ class CameraStream:
         enc_opts = (
             f'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period={key_int}"'
             if self._encoder == "v4l2h264enc"
-            else f"tune=zerolatency speed-preset=ultrafast key-int-max={key_int} bitrate=2500"
+            else f"tune=zerolatency speed-preset=ultrafast key-int-max={key_int} bitrate={self._scfg.video_bitrate}"
             if self._encoder == "x264enc"
             else ""
         )
@@ -379,6 +379,7 @@ class CameraStream:
                 ))
             elif self._encoder == "x264enc":
                 enc.set_property("tune", 4)  # zerolatency
+                enc.set_property("bitrate", self._scfg.video_bitrate)
 
             elements = [queue, enc, parse, mux, sink]
             for el in elements:

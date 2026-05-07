@@ -20,6 +20,7 @@ streaming:
   hls_dir: /tmp/hls
   hls_target_duration: 1
   hls_max_files: 3
+  video_bitrate: 4000  # kbps; increase for better image quality (requires more bandwidth)
   # video_device: ""   # leave empty for auto-detect; set e.g. "/dev/video0" to pin a specific webcam
   # audio_device: ""   # leave empty for auto-detect; set e.g. "hw:1,0" to pin a specific mic
 
