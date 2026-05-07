@@ -1,5 +1,5 @@
 [Unit]
-Description=BabyMonitor Kiosk (Chromium)
+Description=BabyMonitor Kiosk (native GTK+GStreamer)
 After=babymonitor-monitor.service graphical.target
 Requires=graphical.target
 
@@ -8,22 +8,10 @@ Type=simple
 User=pi
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/pi/.Xauthority
+Environment=KIOSK_MODE=1
 # Wait until the monitor FSM has written the camera URL
 ExecStartPre=/bin/bash -c 'until [ -f /etc/babymonitor/kiosk_url ]; do sleep 1; done'
-ExecStart=/bin/bash -c '\
-    URL=$(cat /etc/babymonitor/kiosk_url); \
-    chromium-browser \
-        --kiosk \
-        --noerrdialogs \
-        --disable-infobars \
-        --disable-restore-session-state \
-        --disable-session-crashed-bubble \
-        --disable-translate \
-        --disable-features=TranslateUI \
-        --touch-events=enabled \
-        --enable-features=OverlayScrollbar \
-        --check-for-update-interval=31536000 \
-        "$URL"'
+ExecStart=/usr/bin/python3 /opt/babymonitor/babymonitor/monitor_app.py
 Restart=on-failure
 RestartSec=5
 

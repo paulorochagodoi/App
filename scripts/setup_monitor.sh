@@ -15,12 +15,21 @@ apt-get install -y \
     network-manager \
     avahi-daemon \
     avahi-utils \
-    chromium-browser \
     xorg \
-    openbox
+    openbox \
+    python3-gi \
+    python3-gst-1.0 \
+    gir1.2-gtk-3.0 \
+    gir1.2-gstreamer-1.0 \
+    gir1.2-gst-plugins-base-1.0 \
+    gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-good \
+    gstreamer1.0-plugins-ugly \
+    gstreamer1.0-libav \
+    gstreamer1.0-gtk3
 
-# Python dependencies (monitor only needs FSM)
-pip3 install --break-system-packages pyyaml zeroconf
+# Python dependencies
+pip3 install --break-system-packages pyyaml zeroconf websockets
 
 # Install app (only the modules needed by monitor_node)
 mkdir -p "${INSTALL_DIR}" "${CONFIG_DIR}"
