@@ -204,9 +204,14 @@ def create_app(
 
         stream_ok = hls_exists and hls_fresh
         camera_info = stream.source_info if stream and hasattr(stream, "source_info") else {}
+
+        from babymonitor.streaming.webrtc_stream import _WEBRTC_AVAILABLE
+        webrtc_peers = len(stream._webrtc_peers) if stream and hasattr(stream, "_webrtc_peers") else 0
+
         return {
             "status": "ok" if stream_ok else "degraded",
             "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
+            "webrtc": {"available": _WEBRTC_AVAILABLE, "active_peers": webrtc_peers},
             "camera": camera_info,
             "detector": {"running": cry_detector.is_running() if cry_detector else False},
             "recording": recorder.is_recording(),

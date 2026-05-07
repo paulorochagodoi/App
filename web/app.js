@@ -45,6 +45,7 @@ function stopWebRTC() {
     video.srcObject.getTracks().forEach(t => t.stop());
     video.srcObject = null;
   }
+  setStreamMode(null);
 }
 
 async function startWebRTC() {
@@ -128,6 +129,7 @@ async function startWebRTC() {
       setTimeout(reject, 8000);
     });
 
+    setStreamMode('webrtc');
     return true;
   } catch (err) {
     console.warn('WebRTC failed, falling back to HLS:', err);
@@ -163,6 +165,7 @@ function startHls() {
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       video.play().catch(() => {});
       errorEl.classList.add('hidden');
+      setStreamMode('hls');
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
@@ -178,6 +181,7 @@ function startHls() {
     video.addEventListener('loadedmetadata', () => {
       video.play().catch(() => {});
       errorEl.classList.add('hidden');
+      setStreamMode('hls');
     }, { once: true });
     video.addEventListener('error', () => {
       errorEl.classList.remove('hidden');
@@ -339,9 +343,31 @@ function connectWebSocket() {
 
 function setConnectionStatus(connected) {
   const dot = document.getElementById('live-indicator');
-  if (dot) {
-    dot.textContent = connected ? '● AO VIVO' : '○ RECONECTANDO';
-    dot.classList.toggle('disconnected', !connected);
+  if (!dot) return;
+  if (!connected) {
+    dot.textContent = '○ RECONECTANDO';
+    dot.classList.add('disconnected');
+    return;
+  }
+  dot.classList.remove('disconnected');
+  // Mode is set by setStreamMode(); only reset text if mode not yet known
+  if (!dot.dataset.mode) dot.textContent = '● AO VIVO';
+}
+
+function setStreamMode(mode) {
+  // mode: 'webrtc' | 'hls' | null
+  const dot = document.getElementById('live-indicator');
+  if (!dot) return;
+  dot.dataset.mode = mode || '';
+  if (mode === 'webrtc') {
+    dot.textContent = '● WebRTC';
+    dot.title = 'Streaming via WebRTC (~100–400 ms de delay)';
+  } else if (mode === 'hls') {
+    dot.textContent = '● HLS';
+    dot.title = 'Streaming via HLS (~2 s de delay)';
+  } else {
+    dot.textContent = '● AO VIVO';
+    dot.title = '';
   }
 }
 
