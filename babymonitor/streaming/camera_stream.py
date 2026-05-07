@@ -260,6 +260,7 @@ class CameraStream:
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
         self._enctee: Gst.Element | None = None
+        self._audiotee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
@@ -307,6 +308,7 @@ class CameraStream:
                 return
         self._tee = self._pipeline.get_by_name("t")
         self._enctee = self._pipeline.get_by_name("enct")
+        self._audiotee = self._pipeline.get_by_name("atee")
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
@@ -377,10 +379,12 @@ class CameraStream:
                 f"  {self._audio_src} "
                 f"! audioconvert "
                 f"! audioresample "
-                f"! audio/x-raw,rate=44100,channels=1 "
-                f"! {self._audio_encoder} {audio_enc_opts} "
-                f"! aacparse "
-                f"! hlssink.audio_0 "
+                f"! tee name=atee "
+                f"  atee. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
+                f"        ! audio/x-raw,rate=44100,channels=1 "
+                f"        ! {self._audio_encoder} {audio_enc_opts} "
+                f"        ! aacparse "
+                f"        ! hlssink.audio_0 "
             )
 
         return (
@@ -518,6 +522,7 @@ class CameraStream:
             self._pipeline = None
             self._tee = None
             self._enctee = None
+            self._audiotee = None
         self._launch_pipeline()
         return False  # remove from GLib idle sources
 
@@ -581,13 +586,55 @@ class CameraStream:
         if tee_pad:
             tee_pad.link(queue.get_static_pad("sink"))
 
+        # Audio branch — requires opusenc + rtpopuspay (gstreamer1.0-plugins-good)
+        audio_els: list[Gst.Element] = []
+        atee_pad = None
+        if (
+            self._audiotee
+            and Gst.ElementFactory.find("opusenc")
+            and Gst.ElementFactory.find("rtpopuspay")
+        ):
+            aq    = Gst.ElementFactory.make("queue",         f"wrtc_aq_{peer_id}")
+            aconv = Gst.ElementFactory.make("audioconvert",  f"wrtc_aconv_{peer_id}")
+            ares  = Gst.ElementFactory.make("audioresample", f"wrtc_ares_{peer_id}")
+            aenc  = Gst.ElementFactory.make("opusenc",       f"wrtc_aenc_{peer_id}")
+            apay  = Gst.ElementFactory.make("rtpopuspay",    f"wrtc_apay_{peer_id}")
+            acf   = Gst.ElementFactory.make("capsfilter",    f"wrtc_acf_{peer_id}")
+            if all([aq, aconv, ares, aenc, apay, acf]):
+                aq.set_property("max-size-buffers", 4)
+                aq.set_property("leaky", 2)
+                acf.set_property(
+                    "caps",
+                    Gst.Caps.from_string(
+                        "application/x-rtp,media=audio,encoding-name=OPUS,"
+                        "payload=97,clock-rate=48000"
+                    ),
+                )
+                audio_els = [aq, aconv, ares, aenc, apay, acf]
+                for el in audio_els:
+                    self._pipeline.add(el)
+                    el.sync_state_with_parent()
+                aq.link(aconv)
+                aconv.link(ares)
+                ares.link(aenc)
+                aenc.link(apay)
+                apay.link(acf)
+                acf.link(wb)
+                atee_pad = self._audiotee.get_request_pad("src_%u")
+                if atee_pad:
+                    atee_pad.link(aq.get_static_pad("sink"))
+            else:
+                log.warning("Failed to create WebRTC audio elements for peer %s", peer_id)
+
         with self._webrtc_lock:
             self._webrtc_peers[peer_id] = {
                 "elements": [queue, pay, cf, wb],
                 "tee_pad": tee_pad,
+                "audio_elements": audio_els,
+                "atee_pad": atee_pad,
             }
 
-        log.info("WebRTC peer added: %s", peer_id)
+        log.info("WebRTC peer added: %s (audio=%s)", peer_id, bool(audio_els))
         return WebRTCPeer(peer_id, wb, loop, on_send)
 
     def remove_webrtc_peer(self, peer_id: str) -> None:
@@ -596,13 +643,21 @@ class CameraStream:
         if not data:
             return
 
+        import time as _time
+
         tee_pad = data["tee_pad"]
         if tee_pad and self._enctee:
             tee_pad.send_event(Gst.Event.new_eos())
-            import time as _time; _time.sleep(0.1)
+            _time.sleep(0.1)
             self._enctee.release_request_pad(tee_pad)
 
-        for el in data["elements"]:
+        atee_pad = data.get("atee_pad")
+        if atee_pad and self._audiotee:
+            atee_pad.send_event(Gst.Event.new_eos())
+            _time.sleep(0.1)
+            self._audiotee.release_request_pad(atee_pad)
+
+        for el in data["elements"] + data.get("audio_elements", []):
             el.set_state(Gst.State.NULL)
             if self._pipeline:
                 self._pipeline.remove(el)

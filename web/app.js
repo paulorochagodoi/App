@@ -62,6 +62,7 @@ async function startWebRTC() {
     webrtcPc = pc;
 
     // Prefer H264 to match the GStreamer encoding pipeline
+    pc.addTransceiver('audio', { direction: 'recvonly' });
     const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
     if (RTCRtpReceiver.getCapabilities) {
       const caps = RTCRtpReceiver.getCapabilities('video');
@@ -199,6 +200,14 @@ async function startLiveStream() {
   if (hls) { hls.destroy(); hls = null; }
   const ok = await startWebRTC();
   if (!ok) startHls();
+}
+
+// ── Mute toggle ───────────────────────────────────────────────────────────
+function toggleMute() {
+  const video = document.getElementById('live-video');
+  const btn = document.getElementById('mute-btn');
+  video.muted = !video.muted;
+  btn.textContent = video.muted ? '🔇' : '🔊';
 }
 
 // ── Recording ──────────────────────────────────────────────────────────────
