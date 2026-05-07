@@ -224,7 +224,24 @@ class CameraStream:
             "Launching GStreamer pipeline (encoder=%s):\n%s",
             self._encoder, pipeline_str,
         )
-        self._pipeline = Gst.parse_launch(pipeline_str)
+        try:
+            self._pipeline = Gst.parse_launch(pipeline_str)
+        except GLib.Error as exc:
+            # hlssink2 audio request pads require GStreamer ≥ 1.22; older builds
+            # (e.g. 1.18 on Bullseye) don't expose them, so fall back to video-only.
+            if self._audio_src and self._audio_encoder:
+                log.warning(
+                    "Pipeline with audio failed (%s) — falling back to video-only pipeline",
+                    exc,
+                )
+                self._audio_src = None
+                self._audio_encoder = None
+                pipeline_str = self._build_pipeline()
+                self._pipeline = Gst.parse_launch(pipeline_str)
+            else:
+                self._pipeline_error = f"Failed to build GStreamer pipeline: {exc}"
+                log.error(self._pipeline_error)
+                return
         self._tee = self._pipeline.get_by_name("t")
 
         bus = self._pipeline.get_bus()
