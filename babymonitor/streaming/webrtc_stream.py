@@ -6,15 +6,27 @@ log = get_logger(__name__)
 
 STUN_SERVER = "stun://stun.l.google.com:19302"
 
+_WEBRTC_UNAVAILABLE_REASON: "str | None" = None
+
 try:
     import gi
     gi.require_version("Gst", "1.0")
     gi.require_version("GstWebRTC", "1.0")
     gi.require_version("GstSdp", "1.0")
     from gi.repository import Gst, GstWebRTC, GstSdp
-    _WEBRTC_AVAILABLE = bool(Gst.ElementFactory.find("webrtcbin"))
-except (ImportError, ValueError):
+    if Gst.ElementFactory.find("webrtcbin"):
+        _WEBRTC_AVAILABLE = True
+    else:
+        _WEBRTC_AVAILABLE = False
+        _WEBRTC_UNAVAILABLE_REASON = (
+            "GStreamer element 'webrtcbin' not found — "
+            "install gstreamer1.0-plugins-bad"
+        )
+        log.warning("WebRTC unavailable: %s", _WEBRTC_UNAVAILABLE_REASON)
+except (ImportError, ValueError, OSError, RuntimeError) as _exc:
     _WEBRTC_AVAILABLE = False
+    _WEBRTC_UNAVAILABLE_REASON = str(_exc)
+    log.warning("WebRTC unavailable: %s", _exc)
 
 
 class WebRTCPeer:
