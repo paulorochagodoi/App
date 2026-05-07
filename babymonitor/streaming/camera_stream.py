@@ -136,6 +136,30 @@ def _find_webcam_audio_device(video_device: str) -> str | None:
     return None
 
 
+def _find_alsa_capture_device() -> str | None:
+    """
+    Scan /proc/asound/pcm for the first ALSA device that supports capture.
+    Returns a device string like 'hw:1,0', or None.
+    """
+    try:
+        if not os.path.exists("/proc/asound/pcm"):
+            return None
+        with open("/proc/asound/pcm") as f:
+            for line in f:
+                if "capture" not in line:
+                    continue
+                # Format: "CC-DD: Device Name : playback N : capture N"
+                card_dev = line.split(":")[0].strip()  # e.g. "01-00"
+                parts = card_dev.split("-")
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    device = f"hw:{int(parts[0])},{int(parts[1])}"
+                    log.info("Found ALSA capture device via /proc/asound/pcm: %s", device)
+                    return device
+    except Exception as exc:
+        log.debug("ALSA capture scan failed: %s", exc)
+    return None
+
+
 def _detect_audio_source(
     audio_device: str = "",
     video_device: str = "",
@@ -156,6 +180,13 @@ def _detect_audio_source(
             log.warning("alsasrc not found; cannot use webcam audio device '%s'", webcam_audio)
         else:
             log.warning("use_webcam_audio=True but no audio device found for %s", video_device)
+
+    # Try a specific ALSA capture device before generic sources — avoids hitting
+    # hw:0,0 (playback-only) or PipeWire/OpenAL backends that fail on headless systems.
+    if _element_available("alsasrc"):
+        alsa_dev = _find_alsa_capture_device()
+        if alsa_dev:
+            return f"alsasrc device={alsa_dev}"
 
     for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
         if _element_available(src):
