@@ -50,10 +50,10 @@ function startHls() {
     hls = new Hls({
       lowLatencyMode: true,
       backBufferLength: 0,
-      maxBufferLength: 4,
-      maxMaxBufferLength: 8,
-      liveSyncDuration: 2,
-      liveMaxLatencyDuration: 5,
+      maxBufferLength: 2,
+      maxMaxBufferLength: 3,
+      liveSyncDuration: 1,
+      liveMaxLatencyDuration: 3,
       liveDurationInfinity: true,
     });
     hls.loadSource(src);

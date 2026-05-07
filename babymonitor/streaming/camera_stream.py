@@ -90,6 +90,36 @@ def _detect_h264_encoders() -> list[str]:
     return available
 
 
+def _detect_audio_source(audio_device: str = "") -> str | None:
+    """Return a GStreamer audio source element string, or None if none found."""
+    if audio_device:
+        if Gst.ElementFactory.find("alsasrc"):
+            log.info("Using configured ALSA audio device: %s", audio_device)
+            return f"alsasrc device={audio_device}"
+        log.warning("alsasrc not found; ignoring configured audio_device '%s'", audio_device)
+
+    for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
+        if Gst.ElementFactory.find(src):
+            log.info("Using audio source: %s", src)
+            return src
+
+    log.warning("No audio source found; stream will have no audio")
+    return None
+
+
+def _detect_aac_encoder() -> str | None:
+    """Return the first available AAC encoder element name, or None."""
+    for enc in ("avenc_aac", "voaacenc", "faac"):
+        if Gst.ElementFactory.find(enc):
+            log.info("Using AAC encoder: %s", enc)
+            return enc
+    log.warning(
+        "No AAC encoder found; stream will have no audio. "
+        "Install with: sudo apt-get install gstreamer1.0-libav"
+    )
+    return None
+
+
 def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> str:
     """
     Build GStreamer source + caps string for a V4L2 webcam.
@@ -142,14 +172,19 @@ class CameraStream:
     """
     GStreamer pipeline:
       [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee
-        branch A: <h264enc> → h264parse → hlssink2           (live HLS)
-        branch B: <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
+        branch A (video): <h264enc> → h264parse → hlssink2           (live HLS)
+        branch B (video): <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
+      [pulsesrc | alsasrc | autoaudiosrc] → audioconvert → audioresample → <aacenc> → aacparse → hlssink2.audio_0
 
     Webcam support:
       - Auto-detects libcamerasrc (Pi Camera Module) vs. V4L2 (USB webcam)
       - Scans /dev/video* for a capture-capable device when no explicit path is configured
       - Handles MJPEG-outputting webcams transparently via jpegdec
       - Falls back from v4l2h264enc to x264enc / openh264enc when hardware encoder absent
+    Audio support:
+      - Auto-detects pulsesrc → alsasrc → autoaudiosrc
+      - AAC encoding via avenc_aac → voaacenc → faac (first available)
+      - Pipeline still works without audio if no mic/encoder is available
     """
 
     def __init__(self, streaming: StreamingConfig, recordings: RecordingsConfig):
@@ -160,6 +195,8 @@ class CameraStream:
         self._camera_src, self._device = _detect_camera_source(streaming.video_device)
         self._encoder_candidates = _detect_h264_encoders()
         self._encoder = self._encoder_candidates[0]
+        self._audio_src = _detect_audio_source(streaming.audio_device)
+        self._audio_encoder = _detect_aac_encoder() if self._audio_src else None
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
@@ -201,8 +238,9 @@ class CameraStream:
         else:
             self._pipeline_running = True
             log.info(
-                "Camera stream started — source=%s device=%s encoder=%s hls_dir=%s",
-                self._camera_src, self._device or "N/A", self._encoder, self._scfg.hls_dir,
+                "Camera stream started — source=%s device=%s encoder=%s audio=%s hls_dir=%s",
+                self._camera_src, self._device or "N/A", self._encoder,
+                self._audio_src or "none", self._scfg.hls_dir,
             )
 
     def stop(self) -> None:
@@ -222,6 +260,7 @@ class CameraStream:
         hls_dir = self._scfg.hls_dir
         dur = self._scfg.hls_target_duration
         maxf = self._scfg.hls_max_files
+        key_int = fps  # one keyframe per second aligns with HLS segment boundaries
 
         if self._camera_src == "libcamerasrc":
             src_str = (
@@ -233,9 +272,9 @@ class CameraStream:
             src_str = _webcam_input_caps(self._device, w, h, fps)
 
         enc_opts = (
-            'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period=30"'
+            f'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period={key_int}"'
             if self._encoder == "v4l2h264enc"
-            else "tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=1500"
+            else f"tune=zerolatency speed-preset=ultrafast key-int-max={key_int} bitrate=2500"
             if self._encoder == "x264enc"
             else ""
         )
@@ -249,6 +288,19 @@ class CameraStream:
             if self._scfg.timestamp_overlay
             else ""
         )
+
+        audio_branch = ""
+        if self._audio_src and self._audio_encoder:
+            audio_enc_opts = "bitrate=128000" if self._audio_encoder == "avenc_aac" else ""
+            audio_branch = (
+                f"  {self._audio_src} "
+                f"! audioconvert "
+                f"! audioresample "
+                f"! audio/x-raw,rate=44100,channels=1 "
+                f"! {self._audio_encoder} {audio_enc_opts} "
+                f"! aacparse "
+                f"! hlssink.audio_0 "
+            )
 
         return (
             f"{src_str} "
@@ -264,6 +316,7 @@ class CameraStream:
             f"           location={hls_dir}/seg%05d.ts "
             f"           playlist-location={hls_dir}/live.m3u8 "
             f"           playlist-root=. "
+            f"{audio_branch}"
         )
 
     # ------------------------------------------------------------------
