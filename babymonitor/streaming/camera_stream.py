@@ -90,6 +90,36 @@ def _detect_h264_encoders() -> list[str]:
     return available
 
 
+def _detect_audio_source(audio_device: str = "") -> str | None:
+    """Return a GStreamer audio source element string, or None if none found."""
+    if audio_device:
+        if Gst.ElementFactory.find("alsasrc"):
+            log.info("Using configured ALSA audio device: %s", audio_device)
+            return f"alsasrc device={audio_device}"
+        log.warning("alsasrc not found; ignoring configured audio_device '%s'", audio_device)
+
+    for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
+        if Gst.ElementFactory.find(src):
+            log.info("Using audio source: %s", src)
+            return src
+
+    log.warning("No audio source found; stream will have no audio")
+    return None
+
+
+def _detect_aac_encoder() -> str | None:
+    """Return the first available AAC encoder element name, or None."""
+    for enc in ("avenc_aac", "voaacenc", "faac"):
+        if Gst.ElementFactory.find(enc):
+            log.info("Using AAC encoder: %s", enc)
+            return enc
+    log.warning(
+        "No AAC encoder found; stream will have no audio. "
+        "Install with: sudo apt-get install gstreamer1.0-libav"
+    )
+    return None
+
+
 def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> str:
     """
     Build GStreamer source + caps string for a V4L2 webcam.
@@ -141,15 +171,26 @@ def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> 
 class CameraStream:
     """
     GStreamer pipeline:
-      [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee
-        branch A: <h264enc> → h264parse → hlssink2           (live HLS)
-        branch B: <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
+      [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee name=t
+        t. → queue → <h264enc> → tee name=enct
+          enct. → h264parse → hlssink2           (live HLS)
+          enct. → rtph264pay → webrtcbin × N     (WebRTC peers, dynamic)
+        t. → queue → <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
+      [pulsesrc | alsasrc | autoaudiosrc] → audioconvert → audioresample → <aacenc> → aacparse → hlssink2.audio_0
 
     Webcam support:
       - Auto-detects libcamerasrc (Pi Camera Module) vs. V4L2 (USB webcam)
       - Scans /dev/video* for a capture-capable device when no explicit path is configured
       - Handles MJPEG-outputting webcams transparently via jpegdec
       - Falls back from v4l2h264enc to x264enc / openh264enc when hardware encoder absent
+    Audio support:
+      - Auto-detects pulsesrc → alsasrc → autoaudiosrc
+      - AAC encoding via avenc_aac → voaacenc → faac (first available)
+      - Pipeline still works without audio if no mic/encoder is available
+    WebRTC support:
+      - Peers connect to the encoded-video tee (enct) for sub-second latency
+      - Each peer is a dynamically added webrtcbin element
+      - Falls back gracefully if webrtcbin is unavailable (GStreamer < 1.18)
     """
 
     def __init__(self, streaming: StreamingConfig, recordings: RecordingsConfig):
@@ -160,12 +201,17 @@ class CameraStream:
         self._camera_src, self._device = _detect_camera_source(streaming.video_device)
         self._encoder_candidates = _detect_h264_encoders()
         self._encoder = self._encoder_candidates[0]
+        self._audio_src = _detect_audio_source(streaming.audio_device)
+        self._audio_encoder = _detect_aac_encoder() if self._audio_src else None
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
+        self._enctee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
         self._rec_lock = threading.Lock()
+        self._webrtc_peers: dict[str, dict] = {}
+        self._webrtc_lock = threading.Lock()
         self._pipeline_running = False
         self._pipeline_error: str | None = None
         os.makedirs(streaming.hls_dir, exist_ok=True)
@@ -187,8 +233,26 @@ class CameraStream:
             "Launching GStreamer pipeline (encoder=%s):\n%s",
             self._encoder, pipeline_str,
         )
-        self._pipeline = Gst.parse_launch(pipeline_str)
+        try:
+            self._pipeline = Gst.parse_launch(pipeline_str)
+        except GLib.Error as exc:
+            # hlssink2 audio request pads require GStreamer ≥ 1.22; older builds
+            # (e.g. 1.18 on Bullseye) don't expose them, so fall back to video-only.
+            if self._audio_src and self._audio_encoder:
+                log.warning(
+                    "Pipeline with audio failed (%s) — falling back to video-only pipeline",
+                    exc,
+                )
+                self._audio_src = None
+                self._audio_encoder = None
+                pipeline_str = self._build_pipeline()
+                self._pipeline = Gst.parse_launch(pipeline_str)
+            else:
+                self._pipeline_error = f"Failed to build GStreamer pipeline: {exc}"
+                log.error(self._pipeline_error)
+                return
         self._tee = self._pipeline.get_by_name("t")
+        self._enctee = self._pipeline.get_by_name("enct")
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
@@ -201,8 +265,9 @@ class CameraStream:
         else:
             self._pipeline_running = True
             log.info(
-                "Camera stream started — source=%s device=%s encoder=%s hls_dir=%s",
-                self._camera_src, self._device or "N/A", self._encoder, self._scfg.hls_dir,
+                "Camera stream started — source=%s device=%s encoder=%s audio=%s hls_dir=%s",
+                self._camera_src, self._device or "N/A", self._encoder,
+                self._audio_src or "none", self._scfg.hls_dir,
             )
 
     def stop(self) -> None:
@@ -222,6 +287,7 @@ class CameraStream:
         hls_dir = self._scfg.hls_dir
         dur = self._scfg.hls_target_duration
         maxf = self._scfg.hls_max_files
+        key_int = fps  # one keyframe per second aligns with HLS segment boundaries
 
         if self._camera_src == "libcamerasrc":
             src_str = (
@@ -233,9 +299,9 @@ class CameraStream:
             src_str = _webcam_input_caps(self._device, w, h, fps)
 
         enc_opts = (
-            'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period=30"'
+            f'extra-controls="controls,repeat_sequence_header=1,h264_i_frame_period={key_int}"'
             if self._encoder == "v4l2h264enc"
-            else "tune=zerolatency speed-preset=ultrafast key-int-max=30 bitrate=1500"
+            else f"tune=zerolatency speed-preset=ultrafast key-int-max={key_int} bitrate=2500"
             if self._encoder == "x264enc"
             else ""
         )
@@ -250,20 +316,35 @@ class CameraStream:
             else ""
         )
 
+        audio_branch = ""
+        if self._audio_src and self._audio_encoder:
+            audio_enc_opts = "bitrate=128000" if self._audio_encoder == "avenc_aac" else ""
+            audio_branch = (
+                f"  {self._audio_src} "
+                f"! audioconvert "
+                f"! audioresample "
+                f"! audio/x-raw,rate=44100,channels=1 "
+                f"! {self._audio_encoder} {audio_enc_opts} "
+                f"! aacparse "
+                f"! hlssink.audio_0 "
+            )
+
         return (
             f"{src_str} "
             f"{overlay_str}"
             f"! tee name=t "
             f"  t. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
             f"       ! {self._encoder} {enc_opts} "
-            f"       ! h264parse "
-            f"       ! hlssink2 name=hlssink "
-            f"           target-duration={dur} "
-            f"           max-files={maxf} "
-            f"           send-keyframe-requests=true "
-            f"           location={hls_dir}/seg%05d.ts "
-            f"           playlist-location={hls_dir}/live.m3u8 "
-            f"           playlist-root=. "
+            f"       ! tee name=enct "
+            f"  enct. ! h264parse "
+            f"         ! hlssink2 name=hlssink "
+            f"             target-duration={dur} "
+            f"             max-files={maxf} "
+            f"             send-keyframe-requests=true "
+            f"             location={hls_dir}/seg%05d.ts "
+            f"             playlist-location={hls_dir}/live.m3u8 "
+            f"             playlist-root=. "
+            f"{audio_branch}"
         )
 
     # ------------------------------------------------------------------
@@ -372,11 +453,104 @@ class CameraStream:
     def _restart_pipeline(self) -> bool:
         """Tear down the current pipeline and relaunch with the updated encoder. GLib idle callback."""
         self._pipeline_running = False
+        with self._webrtc_lock:
+            peer_ids = list(self._webrtc_peers.keys())
+        for pid in peer_ids:
+            self.remove_webrtc_peer(pid)
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
             bus = self._pipeline.get_bus()
             bus.remove_signal_watch()
             self._pipeline = None
             self._tee = None
+            self._enctee = None
         self._launch_pipeline()
         return False  # remove from GLib idle sources
+
+    # ------------------------------------------------------------------
+    # WebRTC peers (dynamic branches from the encoded-video tee)
+    # ------------------------------------------------------------------
+
+    def add_webrtc_peer(self, peer_id: str, loop, on_send) -> "object | None":
+        """
+        Add a WebRTC peer that receives the live H.264 stream with sub-second latency.
+        Returns a WebRTCPeer instance, or None if WebRTC is unavailable.
+        """
+        from babymonitor.streaming.webrtc_stream import (
+            WebRTCPeer, STUN_SERVER, _WEBRTC_AVAILABLE,
+        )
+        if not _WEBRTC_AVAILABLE:
+            log.warning("webrtcbin not available — WebRTC peer rejected")
+            return None
+        if not self._enctee or not self._pipeline:
+            log.warning("Pipeline not ready for WebRTC peer %s", peer_id)
+            return None
+
+        from gi.repository import GstWebRTC
+
+        queue = Gst.ElementFactory.make("queue",       f"wrtc_q_{peer_id}")
+        pay   = Gst.ElementFactory.make("rtph264pay",  f"wrtc_pay_{peer_id}")
+        cf    = Gst.ElementFactory.make("capsfilter",  f"wrtc_cf_{peer_id}")
+        wb    = Gst.ElementFactory.make("webrtcbin",   f"wrtc_{peer_id}")
+
+        if not all([queue, pay, cf, wb]):
+            log.error("Failed to create WebRTC elements for peer %s", peer_id)
+            return None
+
+        pay.set_property("config-interval", -1)  # SPS/PPS inline with every keyframe
+        try:
+            pay.set_property("aggregate-mode", 1)  # zero-latency
+        except Exception:
+            pass
+
+        cf.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "application/x-rtp,media=video,encoding-name=H264,payload=96"
+            ),
+        )
+        wb.set_property("stun-server", STUN_SERVER)
+        try:
+            wb.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
+        except Exception:
+            pass
+
+        for el in [queue, pay, cf, wb]:
+            self._pipeline.add(el)
+            el.sync_state_with_parent()
+
+        queue.link(pay)
+        pay.link(cf)
+        cf.link(wb)
+
+        tee_pad = self._enctee.get_request_pad("src_%u")
+        if tee_pad:
+            tee_pad.link(queue.get_static_pad("sink"))
+
+        with self._webrtc_lock:
+            self._webrtc_peers[peer_id] = {
+                "elements": [queue, pay, cf, wb],
+                "tee_pad": tee_pad,
+            }
+
+        log.info("WebRTC peer added: %s", peer_id)
+        return WebRTCPeer(peer_id, wb, loop, on_send)
+
+    def remove_webrtc_peer(self, peer_id: str) -> None:
+        with self._webrtc_lock:
+            data = self._webrtc_peers.pop(peer_id, None)
+        if not data:
+            return
+
+        tee_pad = data["tee_pad"]
+        if tee_pad and self._enctee:
+            tee_pad.send_event(Gst.Event.new_eos())
+            import time as _time; _time.sleep(0.1)
+            self._enctee.release_request_pad(tee_pad)
+
+        for el in data["elements"]:
+            el.set_state(Gst.State.NULL)
+            if self._pipeline:
+                self._pipeline.remove(el)
+
+        log.info("WebRTC peer removed: %s", peer_id)

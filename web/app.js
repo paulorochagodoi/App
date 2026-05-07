@@ -9,6 +9,8 @@ let alertDismissed = false;
 let alertTimeout = null;
 let hls = null;
 let hlsRetryTimer = null;
+let webrtcPc = null;
+let webrtcWs = null;
 let wsRetryDelay = 1000;
 const WS_MAX_DELAY = 30000;
 
@@ -31,10 +33,112 @@ function showScreen(name) {
   });
 
   if (name === 'recordings') loadRecordings();
-  if (name === 'live') startHls();
+  if (name === 'live') startLiveStream();
 }
 
-// ── HLS live stream ────────────────────────────────────────────────────────
+// ── WebRTC live stream ─────────────────────────────────────────────────────
+function stopWebRTC() {
+  if (webrtcWs) { try { webrtcWs.close(); } catch (_) {} webrtcWs = null; }
+  if (webrtcPc) { try { webrtcPc.close(); } catch (_) {} webrtcPc = null; }
+  const video = document.getElementById('live-video');
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+  }
+  setStreamMode(null);
+}
+
+async function startWebRTC() {
+  if (!window.RTCPeerConnection) return false;
+
+  stopWebRTC();
+  const video = document.getElementById('live-video');
+  const errorEl = document.getElementById('stream-error');
+
+  try {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+    webrtcPc = pc;
+
+    // Prefer H264 to match the GStreamer encoding pipeline
+    const transceiver = pc.addTransceiver('video', { direction: 'recvonly' });
+    if (RTCRtpReceiver.getCapabilities) {
+      const caps = RTCRtpReceiver.getCapabilities('video');
+      if (caps) {
+        const h264 = caps.codecs.filter(c => c.mimeType === 'video/H264');
+        const rest = caps.codecs.filter(c => c.mimeType !== 'video/H264');
+        if (h264.length) transceiver.setCodecPreferences([...h264, ...rest]);
+      }
+    }
+
+    pc.ontrack = (event) => {
+      if (event.streams[0]) {
+        video.srcObject = event.streams[0];
+        video.play().catch(() => {});
+        errorEl.classList.add('hidden');
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        stopWebRTC();
+        startHls();
+      }
+    };
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/ws/webrtc`);
+    webrtcWs = ws;
+
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = reject;
+      setTimeout(reject, 5000);
+    });
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'ice-candidate',
+          candidate: event.candidate.candidate,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+        }));
+      }
+    };
+
+    ws.onmessage = async (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'answer') {
+        await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      } else if (msg.type === 'ice-candidate') {
+        await pc.addIceCandidate({ candidate: msg.candidate,
+          sdpMLineIndex: msg.sdpMLineIndex });
+      }
+    };
+
+    ws.onclose = () => { if (!video.srcObject) { stopWebRTC(); startHls(); } };
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+
+    // Wait up to 8 s for video to start playing, then fall back to HLS
+    await new Promise((resolve, reject) => {
+      video.addEventListener('playing', resolve, { once: true });
+      setTimeout(reject, 8000);
+    });
+
+    setStreamMode('webrtc');
+    return true;
+  } catch (err) {
+    console.warn('WebRTC failed, falling back to HLS:', err);
+    stopWebRTC();
+    return false;
+  }
+}
+
+// ── HLS live stream (fallback) ─────────────────────────────────────────────
 function startHls() {
   const video = document.getElementById('live-video');
   const errorEl = document.getElementById('stream-error');
@@ -50,10 +154,10 @@ function startHls() {
     hls = new Hls({
       lowLatencyMode: true,
       backBufferLength: 0,
-      maxBufferLength: 4,
-      maxMaxBufferLength: 8,
-      liveSyncDuration: 2,
-      liveMaxLatencyDuration: 5,
+      maxBufferLength: 2,
+      maxMaxBufferLength: 3,
+      liveSyncDuration: 1,
+      liveMaxLatencyDuration: 3,
       liveDurationInfinity: true,
     });
     hls.loadSource(src);
@@ -61,6 +165,7 @@ function startHls() {
     hls.on(Hls.Events.MANIFEST_PARSED, () => {
       video.play().catch(() => {});
       errorEl.classList.add('hidden');
+      setStreamMode('hls');
     });
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
@@ -76,6 +181,7 @@ function startHls() {
     video.addEventListener('loadedmetadata', () => {
       video.play().catch(() => {});
       errorEl.classList.add('hidden');
+      setStreamMode('hls');
     }, { once: true });
     video.addEventListener('error', () => {
       errorEl.classList.remove('hidden');
@@ -85,6 +191,14 @@ function startHls() {
     errorEl.querySelector('p').textContent = 'Navegador não suporta HLS.';
     errorEl.classList.remove('hidden');
   }
+}
+
+// ── Start live stream — WebRTC first, HLS as fallback ─────────────────────
+async function startLiveStream() {
+  stopWebRTC();
+  if (hls) { hls.destroy(); hls = null; }
+  const ok = await startWebRTC();
+  if (!ok) startHls();
 }
 
 // ── Recording ──────────────────────────────────────────────────────────────
@@ -229,9 +343,31 @@ function connectWebSocket() {
 
 function setConnectionStatus(connected) {
   const dot = document.getElementById('live-indicator');
-  if (dot) {
-    dot.textContent = connected ? '● AO VIVO' : '○ RECONECTANDO';
-    dot.classList.toggle('disconnected', !connected);
+  if (!dot) return;
+  if (!connected) {
+    dot.textContent = '○ RECONECTANDO';
+    dot.classList.add('disconnected');
+    return;
+  }
+  dot.classList.remove('disconnected');
+  // Mode is set by setStreamMode(); only reset text if mode not yet known
+  if (!dot.dataset.mode) dot.textContent = '● AO VIVO';
+}
+
+function setStreamMode(mode) {
+  // mode: 'webrtc' | 'hls' | null
+  const dot = document.getElementById('live-indicator');
+  if (!dot) return;
+  dot.dataset.mode = mode || '';
+  if (mode === 'webrtc') {
+    dot.textContent = '● WebRTC';
+    dot.title = 'Streaming via WebRTC (~100–400 ms de delay)';
+  } else if (mode === 'hls') {
+    dot.textContent = '● HLS';
+    dot.title = 'Streaming via HLS (~2 s de delay)';
+  } else {
+    dot.textContent = '● AO VIVO';
+    dot.title = '';
   }
 }
 
@@ -258,7 +394,7 @@ function formatDuration(s) {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  startHls();
+  startLiveStream();
   connectWebSocket();
 
   // Register service worker for offline asset caching
