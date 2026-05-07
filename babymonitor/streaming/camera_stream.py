@@ -90,13 +90,63 @@ def _detect_h264_encoders() -> list[str]:
     return available
 
 
-def _detect_audio_source(audio_device: str = "") -> str | None:
+def _find_webcam_audio_device(video_device: str) -> str | None:
+    """
+    Try to find the ALSA audio device (hw:N,0) associated with a V4L2 webcam
+    by walking sysfs: /sys/class/video4linux/videoX → USB device → sound/cardN.
+    """
+    import re
+    try:
+        vdev_name = os.path.basename(video_device)
+        sysfs_video = f"/sys/class/video4linux/{vdev_name}"
+        if not os.path.exists(sysfs_video):
+            return None
+
+        real_path = os.path.realpath(sysfs_video)
+        parts = real_path.split("/")
+
+        # Walk up to the USB device node (the part before the interface, e.g. "1-1.1")
+        usb_device_path = None
+        for i, part in enumerate(parts):
+            if re.match(r"\d+-[\d.]+:\d+\.\d+", part):
+                usb_device_path = "/".join(parts[:i])
+                break
+
+        if not usb_device_path:
+            return None
+
+        # Search for sound/cardN under any interface of the same USB device
+        for card_dir in sorted(glob.glob(f"{usb_device_path}/*/sound/card*")):
+            card_num = os.path.basename(card_dir).replace("card", "")
+            if card_num.isdigit():
+                device = f"hw:{card_num},0"
+                log.info("Webcam audio device found via sysfs: %s (video=%s)", device, video_device)
+                return device
+    except Exception as exc:
+        log.debug("Webcam audio sysfs probe failed: %s", exc)
+    return None
+
+
+def _detect_audio_source(
+    audio_device: str = "",
+    video_device: str = "",
+    use_webcam_audio: bool = False,
+) -> str | None:
     """Return a GStreamer audio source element string, or None if none found."""
     if audio_device:
         if Gst.ElementFactory.find("alsasrc"):
             log.info("Using configured ALSA audio device: %s", audio_device)
             return f"alsasrc device={audio_device}"
         log.warning("alsasrc not found; ignoring configured audio_device '%s'", audio_device)
+
+    if use_webcam_audio and video_device:
+        webcam_audio = _find_webcam_audio_device(video_device)
+        if webcam_audio and Gst.ElementFactory.find("alsasrc"):
+            return f"alsasrc device={webcam_audio}"
+        if webcam_audio:
+            log.warning("alsasrc not found; cannot use webcam audio device '%s'", webcam_audio)
+        else:
+            log.warning("use_webcam_audio=True but no audio device found for %s", video_device)
 
     for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
         if Gst.ElementFactory.find(src):
@@ -201,7 +251,11 @@ class CameraStream:
         self._camera_src, self._device = _detect_camera_source(streaming.video_device)
         self._encoder_candidates = _detect_h264_encoders()
         self._encoder = self._encoder_candidates[0]
-        self._audio_src = _detect_audio_source(streaming.audio_device)
+        self._audio_src = _detect_audio_source(
+            audio_device=streaming.audio_device,
+            video_device=self._device,
+            use_webcam_audio=streaming.use_webcam_audio,
+        )
         self._audio_encoder = _detect_aac_encoder() if self._audio_src else None
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
