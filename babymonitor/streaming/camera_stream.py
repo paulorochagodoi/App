@@ -171,9 +171,11 @@ def _webcam_input_caps(device: str, width: int, height: int, framerate: int) -> 
 class CameraStream:
     """
     GStreamer pipeline:
-      [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee
-        branch A (video): <h264enc> → h264parse → hlssink2           (live HLS)
-        branch B (video): <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
+      [libcamerasrc | v4l2src] → videoconvert → [clockoverlay] → tee name=t
+        t. → queue → <h264enc> → tee name=enct
+          enct. → h264parse → hlssink2           (live HLS)
+          enct. → rtph264pay → webrtcbin × N     (WebRTC peers, dynamic)
+        t. → queue → <h264enc> → h264parse → mp4mux → filesink  (recording, dynamic)
       [pulsesrc | alsasrc | autoaudiosrc] → audioconvert → audioresample → <aacenc> → aacparse → hlssink2.audio_0
 
     Webcam support:
@@ -185,6 +187,10 @@ class CameraStream:
       - Auto-detects pulsesrc → alsasrc → autoaudiosrc
       - AAC encoding via avenc_aac → voaacenc → faac (first available)
       - Pipeline still works without audio if no mic/encoder is available
+    WebRTC support:
+      - Peers connect to the encoded-video tee (enct) for sub-second latency
+      - Each peer is a dynamically added webrtcbin element
+      - Falls back gracefully if webrtcbin is unavailable (GStreamer < 1.18)
     """
 
     def __init__(self, streaming: StreamingConfig, recordings: RecordingsConfig):
@@ -199,10 +205,13 @@ class CameraStream:
         self._audio_encoder = _detect_aac_encoder() if self._audio_src else None
         self._pipeline: Gst.Pipeline | None = None
         self._tee: Gst.Element | None = None
+        self._enctee: Gst.Element | None = None
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
         self._rec_lock = threading.Lock()
+        self._webrtc_peers: dict[str, dict] = {}
+        self._webrtc_lock = threading.Lock()
         self._pipeline_running = False
         self._pipeline_error: str | None = None
         os.makedirs(streaming.hls_dir, exist_ok=True)
@@ -243,6 +252,7 @@ class CameraStream:
                 log.error(self._pipeline_error)
                 return
         self._tee = self._pipeline.get_by_name("t")
+        self._enctee = self._pipeline.get_by_name("enct")
 
         bus = self._pipeline.get_bus()
         bus.add_signal_watch()
@@ -325,14 +335,15 @@ class CameraStream:
             f"! tee name=t "
             f"  t. ! queue max-size-buffers=4 max-size-bytes=0 max-size-time=0 leaky=downstream "
             f"       ! {self._encoder} {enc_opts} "
-            f"       ! h264parse "
-            f"       ! hlssink2 name=hlssink "
-            f"           target-duration={dur} "
-            f"           max-files={maxf} "
-            f"           send-keyframe-requests=true "
-            f"           location={hls_dir}/seg%05d.ts "
-            f"           playlist-location={hls_dir}/live.m3u8 "
-            f"           playlist-root=. "
+            f"       ! tee name=enct "
+            f"  enct. ! h264parse "
+            f"         ! hlssink2 name=hlssink "
+            f"             target-duration={dur} "
+            f"             max-files={maxf} "
+            f"             send-keyframe-requests=true "
+            f"             location={hls_dir}/seg%05d.ts "
+            f"             playlist-location={hls_dir}/live.m3u8 "
+            f"             playlist-root=. "
             f"{audio_branch}"
         )
 
@@ -442,11 +453,104 @@ class CameraStream:
     def _restart_pipeline(self) -> bool:
         """Tear down the current pipeline and relaunch with the updated encoder. GLib idle callback."""
         self._pipeline_running = False
+        with self._webrtc_lock:
+            peer_ids = list(self._webrtc_peers.keys())
+        for pid in peer_ids:
+            self.remove_webrtc_peer(pid)
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
             bus = self._pipeline.get_bus()
             bus.remove_signal_watch()
             self._pipeline = None
             self._tee = None
+            self._enctee = None
         self._launch_pipeline()
         return False  # remove from GLib idle sources
+
+    # ------------------------------------------------------------------
+    # WebRTC peers (dynamic branches from the encoded-video tee)
+    # ------------------------------------------------------------------
+
+    def add_webrtc_peer(self, peer_id: str, loop, on_send) -> "object | None":
+        """
+        Add a WebRTC peer that receives the live H.264 stream with sub-second latency.
+        Returns a WebRTCPeer instance, or None if WebRTC is unavailable.
+        """
+        from babymonitor.streaming.webrtc_stream import (
+            WebRTCPeer, STUN_SERVER, _WEBRTC_AVAILABLE,
+        )
+        if not _WEBRTC_AVAILABLE:
+            log.warning("webrtcbin not available — WebRTC peer rejected")
+            return None
+        if not self._enctee or not self._pipeline:
+            log.warning("Pipeline not ready for WebRTC peer %s", peer_id)
+            return None
+
+        from gi.repository import GstWebRTC
+
+        queue = Gst.ElementFactory.make("queue",       f"wrtc_q_{peer_id}")
+        pay   = Gst.ElementFactory.make("rtph264pay",  f"wrtc_pay_{peer_id}")
+        cf    = Gst.ElementFactory.make("capsfilter",  f"wrtc_cf_{peer_id}")
+        wb    = Gst.ElementFactory.make("webrtcbin",   f"wrtc_{peer_id}")
+
+        if not all([queue, pay, cf, wb]):
+            log.error("Failed to create WebRTC elements for peer %s", peer_id)
+            return None
+
+        pay.set_property("config-interval", -1)  # SPS/PPS inline with every keyframe
+        try:
+            pay.set_property("aggregate-mode", 1)  # zero-latency
+        except Exception:
+            pass
+
+        cf.set_property(
+            "caps",
+            Gst.Caps.from_string(
+                "application/x-rtp,media=video,encoding-name=H264,payload=96"
+            ),
+        )
+        wb.set_property("stun-server", STUN_SERVER)
+        try:
+            wb.set_property("bundle-policy", GstWebRTC.WebRTCBundlePolicy.MAX_BUNDLE)
+        except Exception:
+            pass
+
+        for el in [queue, pay, cf, wb]:
+            self._pipeline.add(el)
+            el.sync_state_with_parent()
+
+        queue.link(pay)
+        pay.link(cf)
+        cf.link(wb)
+
+        tee_pad = self._enctee.get_request_pad("src_%u")
+        if tee_pad:
+            tee_pad.link(queue.get_static_pad("sink"))
+
+        with self._webrtc_lock:
+            self._webrtc_peers[peer_id] = {
+                "elements": [queue, pay, cf, wb],
+                "tee_pad": tee_pad,
+            }
+
+        log.info("WebRTC peer added: %s", peer_id)
+        return WebRTCPeer(peer_id, wb, loop, on_send)
+
+    def remove_webrtc_peer(self, peer_id: str) -> None:
+        with self._webrtc_lock:
+            data = self._webrtc_peers.pop(peer_id, None)
+        if not data:
+            return
+
+        tee_pad = data["tee_pad"]
+        if tee_pad and self._enctee:
+            tee_pad.send_event(Gst.Event.new_eos())
+            import time as _time; _time.sleep(0.1)
+            self._enctee.release_request_pad(tee_pad)
+
+        for el in data["elements"]:
+            el.set_state(Gst.State.NULL)
+            if self._pipeline:
+                self._pipeline.remove(el)
+
+        log.info("WebRTC peer removed: %s", peer_id)
