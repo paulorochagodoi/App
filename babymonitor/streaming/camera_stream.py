@@ -261,6 +261,7 @@ class CameraStream:
         self._tee: Gst.Element | None = None
         self._enctee: Gst.Element | None = None
         self._audiotee: Gst.Element | None = None
+        self._audio_failed = False  # set True after audio fallback to avoid retry loop
         self._loop: GLib.MainLoop | None = None
         self._thread: threading.Thread | None = None
         self._rec_elements: list[Gst.Element] = []
@@ -291,8 +292,7 @@ class CameraStream:
         try:
             self._pipeline = Gst.parse_launch(pipeline_str)
         except GLib.Error as exc:
-            # hlssink2 audio request pads require GStreamer ≥ 1.22; older builds
-            # (e.g. 1.18 on Bullseye) don't expose them, so fall back to video-only.
+            # Audio pads / tee may be unsupported on older GStreamer — fall back to video-only.
             if self._audio_src and self._audio_encoder:
                 log.warning(
                     "Pipeline with audio failed (%s) — falling back to video-only pipeline",
@@ -300,8 +300,14 @@ class CameraStream:
                 )
                 self._audio_src = None
                 self._audio_encoder = None
-                pipeline_str = self._build_pipeline()
-                self._pipeline = Gst.parse_launch(pipeline_str)
+                self._audio_failed = True
+                try:
+                    pipeline_str = self._build_pipeline()
+                    self._pipeline = Gst.parse_launch(pipeline_str)
+                except GLib.Error as exc2:
+                    self._pipeline_error = f"Failed to build video-only pipeline: {exc2}"
+                    log.error(self._pipeline_error)
+                    return
             else:
                 self._pipeline_error = f"Failed to build GStreamer pipeline: {exc}"
                 log.error(self._pipeline_error)
@@ -485,6 +491,14 @@ class CameraStream:
             err, debug = message.parse_error()
             log.error("GStreamer pipeline error: %s\nDebug: %s", err, debug)
             if self._try_next_encoder():
+                GLib.idle_add(self._restart_pipeline)
+                return
+            # Audio device failure kills the pipeline — restart video-only
+            if (self._audio_src or self._audio_encoder) and not self._audio_failed:
+                log.warning("Audio pipeline failed — restarting without audio")
+                self._audio_src = None
+                self._audio_encoder = None
+                self._audio_failed = True
                 GLib.idle_add(self._restart_pipeline)
                 return
             self._pipeline_error = str(err)
