@@ -78,9 +78,18 @@ def _detect_camera_source(video_device: str = "") -> tuple[str, str]:
     return "v4l2src", "/dev/video0"
 
 
+def _element_available(name: str) -> bool:
+    """Return True only if the GStreamer element can actually be instantiated (plugin loads)."""
+    el = Gst.ElementFactory.make(name, None)
+    if el is None:
+        return False
+    el.set_state(Gst.State.NULL)
+    return True
+
+
 def _detect_h264_encoders() -> list[str]:
     """Return all available H.264 encoders in priority order."""
-    available = [enc for enc in ("v4l2h264enc", "x264enc", "openh264enc") if Gst.ElementFactory.find(enc)]
+    available = [enc for enc in ("v4l2h264enc", "x264enc", "openh264enc") if _element_available(enc)]
     if not available:
         raise RuntimeError(
             "No H.264 encoder found. Install one of: "
@@ -134,14 +143,14 @@ def _detect_audio_source(
 ) -> str | None:
     """Return a GStreamer audio source element string, or None if none found."""
     if audio_device:
-        if Gst.ElementFactory.find("alsasrc"):
+        if _element_available("alsasrc"):
             log.info("Using configured ALSA audio device: %s", audio_device)
             return f"alsasrc device={audio_device}"
         log.warning("alsasrc not found; ignoring configured audio_device '%s'", audio_device)
 
     if use_webcam_audio and video_device:
         webcam_audio = _find_webcam_audio_device(video_device)
-        if webcam_audio and Gst.ElementFactory.find("alsasrc"):
+        if webcam_audio and _element_available("alsasrc"):
             return f"alsasrc device={webcam_audio}"
         if webcam_audio:
             log.warning("alsasrc not found; cannot use webcam audio device '%s'", webcam_audio)
@@ -149,7 +158,7 @@ def _detect_audio_source(
             log.warning("use_webcam_audio=True but no audio device found for %s", video_device)
 
     for src in ("pulsesrc", "alsasrc", "autoaudiosrc"):
-        if Gst.ElementFactory.find(src):
+        if _element_available(src):
             log.info("Using audio source: %s", src)
             return src
 
@@ -160,7 +169,7 @@ def _detect_audio_source(
 def _detect_aac_encoder() -> str | None:
     """Return the first available AAC encoder element name, or None."""
     for enc in ("avenc_aac", "voaacenc", "faac"):
-        if Gst.ElementFactory.find(enc):
+        if _element_available(enc):
             log.info("Using AAC encoder: %s", enc)
             return enc
     log.warning(
@@ -326,6 +335,7 @@ class CameraStream:
             log.error(self._pipeline_error)
         else:
             self._pipeline_running = True
+            self._pipeline_error = None  # clear any error from a previous run
             log.info(
                 "Camera stream started — source=%s device=%s encoder=%s audio=%s hls_dir=%s",
                 self._camera_src, self._device or "N/A", self._encoder,
