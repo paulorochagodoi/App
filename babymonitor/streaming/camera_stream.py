@@ -214,6 +214,9 @@ class CameraStream:
         self._webrtc_lock = threading.Lock()
         self._pipeline_running = False
         self._pipeline_error: str | None = None
+        self._rtsp_elements: list[Gst.Element] = []
+        self._rtsp_tee_pad: Gst.Pad | None = None
+        self._rtsp_server = None
         os.makedirs(streaming.hls_dir, exist_ok=True)
         os.makedirs(recordings.output_dir, exist_ok=True)
 
@@ -271,6 +274,8 @@ class CameraStream:
             )
 
     def stop(self) -> None:
+        self._detach_rtsp_branch()
+        self._rtsp_server = None
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
         if self._loop:
@@ -458,6 +463,7 @@ class CameraStream:
             peer_ids = list(self._webrtc_peers.keys())
         for pid in peer_ids:
             self.remove_webrtc_peer(pid)
+        self._detach_rtsp_branch()
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
             bus = self._pipeline.get_bus()
@@ -466,6 +472,8 @@ class CameraStream:
             self._tee = None
             self._enctee = None
         self._launch_pipeline()
+        if self._rtsp_server:
+            self.attach_rtsp_server(self._rtsp_server)
         return False  # remove from GLib idle sources
 
     # ------------------------------------------------------------------
@@ -555,3 +563,73 @@ class CameraStream:
                 self._pipeline.remove(el)
 
         log.info("WebRTC peer removed: %s", peer_id)
+
+    # ------------------------------------------------------------------
+    # RTSP branch (dynamic appsink from the encoded-video tee)
+    # ------------------------------------------------------------------
+
+    def attach_rtsp_server(self, rtsp_server) -> bool:
+        """
+        Add an appsink branch from enct to feed frames into the RTSP server.
+
+        Call after start() and before rtsp_server.start().
+        Returns True on success.
+        """
+        if not self._enctee or not self._pipeline:
+            log.warning("Pipeline not ready for RTSP branch")
+            return False
+
+        queue = Gst.ElementFactory.make("queue", "rtsp_queue")
+        appsink = Gst.ElementFactory.make("appsink", "rtsp_appsink")
+
+        if not queue or not appsink:
+            log.error("Failed to create RTSP pipeline elements")
+            return False
+
+        queue.set_property("max-size-buffers", 4)
+        queue.set_property("leaky", 2)   # downstream: drop oldest frame when full
+
+        appsink.set_property("emit-signals", True)
+        appsink.set_property("sync", False)
+        appsink.set_property("drop", True)
+        appsink.set_property("max-buffers", 1)
+
+        self._rtsp_server = rtsp_server
+        appsink.connect("new-sample", self._on_rtsp_sample)
+
+        for el in [queue, appsink]:
+            self._pipeline.add(el)
+            el.sync_state_with_parent()
+
+        queue.link(appsink)
+
+        tee_pad = self._enctee.get_request_pad("src_%u")
+        if tee_pad:
+            tee_pad.link(queue.get_static_pad("sink"))
+
+        self._rtsp_elements = [queue, appsink]
+        self._rtsp_tee_pad = tee_pad
+        log.info("RTSP pipeline branch attached")
+        return True
+
+    def _detach_rtsp_branch(self) -> None:
+        if not self._rtsp_elements:
+            return
+        tee_pad = self._rtsp_tee_pad
+        if tee_pad and self._enctee:
+            tee_pad.send_event(Gst.Event.new_eos())
+            import time as _t; _t.sleep(0.1)
+            self._enctee.release_request_pad(tee_pad)
+        for el in self._rtsp_elements:
+            el.set_state(Gst.State.NULL)
+            if self._pipeline:
+                self._pipeline.remove(el)
+        self._rtsp_elements = []
+        self._rtsp_tee_pad = None
+        log.info("RTSP branch detached")
+
+    def _on_rtsp_sample(self, sink) -> "Gst.FlowReturn":
+        sample = sink.emit("pull-sample")
+        if sample and self._rtsp_server:
+            self._rtsp_server.push_sample(sample)
+        return Gst.FlowReturn.OK

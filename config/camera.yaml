@@ -32,3 +32,8 @@ cry_detector:
   chunk_size: 2048
   threshold: 0.65
   silence_timeout: 10
+
+rtsp:
+  enabled: true
+  port: 8554        # RTSP clients connect here: rtsp://<ip>:8554/live
+  path: /live       # requires: sudo apt-get install gstreamer1.0-rtsp

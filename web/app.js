@@ -34,6 +34,7 @@ function showScreen(name) {
 
   if (name === 'recordings') loadRecordings();
   if (name === 'live') startLiveStream();
+  if (name === 'wifi') loadRtspInfo();
 }
 
 // ── WebRTC live stream ─────────────────────────────────────────────────────
@@ -261,6 +262,39 @@ function playRecording(filename) {
   video.load();
   video.play().catch(() => {});
   showScreen('playback');
+}
+
+// ── RTSP info ──────────────────────────────────────────────────────────────
+async function loadRtspInfo() {
+  const section = document.getElementById('rtsp-section');
+  const urlEl = document.getElementById('rtsp-url');
+  if (!section || !urlEl) return;
+  try {
+    const res = await fetch('/api/rtsp-info');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.enabled && data.available) {
+      const url = `rtsp://${location.hostname}:${data.port}${data.path}`;
+      urlEl.textContent = url;
+      section.classList.remove('hidden');
+    } else {
+      section.classList.add('hidden');
+    }
+  } catch (_) {
+    section.classList.add('hidden');
+  }
+}
+
+function copyRtspUrl() {
+  const urlEl = document.getElementById('rtsp-url');
+  const hint = document.getElementById('rtsp-copy-hint');
+  if (!urlEl || !urlEl.textContent) return;
+  navigator.clipboard.writeText(urlEl.textContent).then(() => {
+    if (hint) {
+      hint.classList.remove('hidden');
+      setTimeout(() => hint.classList.add('hidden'), 2000);
+    }
+  }).catch(() => {});
 }
 
 // ── WiFi ───────────────────────────────────────────────────────────────────

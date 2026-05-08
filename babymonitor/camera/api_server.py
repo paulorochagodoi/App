@@ -186,6 +186,17 @@ def create_app(
             "current_file": recorder.current_file(),
         }
 
+    # ── RTSP info ────────────────────────────────────────────────────────────
+    @app.get("/api/rtsp-info")
+    async def rtsp_info():
+        from babymonitor.streaming.rtsp_stream import _RTSP_AVAILABLE
+        return {
+            "enabled": cfg.rtsp.enabled,
+            "available": _RTSP_AVAILABLE,
+            "port": cfg.rtsp.port,
+            "path": cfg.rtsp.path,
+        }
+
     # ── Health ───────────────────────────────────────────────────────────────
     @app.get("/api/health")
     async def health():
@@ -214,10 +225,24 @@ def create_app(
         if not _WEBRTC_AVAILABLE and _WEBRTC_UNAVAILABLE_REASON:
             webrtc_info["unavailable_reason"] = _WEBRTC_UNAVAILABLE_REASON
 
+        from babymonitor.streaming.rtsp_stream import (
+            _RTSP_AVAILABLE,
+            _RTSP_UNAVAILABLE_REASON,
+        )
+        rtsp_info: dict = {
+            "enabled": cfg.rtsp.enabled,
+            "available": _RTSP_AVAILABLE,
+            "port": cfg.rtsp.port,
+            "path": cfg.rtsp.path,
+        }
+        if not _RTSP_AVAILABLE and _RTSP_UNAVAILABLE_REASON:
+            rtsp_info["unavailable_reason"] = _RTSP_UNAVAILABLE_REASON
+
         return {
             "status": "ok" if stream_ok else "degraded",
             "stream": {"hls_ready": hls_exists, "hls_fresh": hls_fresh},
             "webrtc": webrtc_info,
+            "rtsp": rtsp_info,
             "camera": camera_info,
             "detector": {"running": cry_detector.is_running() if cry_detector else False},
             "recording": recorder.is_recording(),
