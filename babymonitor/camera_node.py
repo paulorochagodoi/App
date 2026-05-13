@@ -31,6 +31,27 @@ def main() -> None:
     stream = CameraStream(cfg.streaming, cfg.recordings)
     stream.start()
 
+    # RTSP server (optional — requires gstreamer1.0-rtsp)
+    rtsp_server = None
+    if cfg.rtsp.enabled:
+        from babymonitor.streaming.rtsp_stream import RtspServer, _RTSP_AVAILABLE, _RTSP_UNAVAILABLE_REASON
+        if _RTSP_AVAILABLE:
+            rtsp_server = RtspServer(
+                port=cfg.rtsp.port,
+                path=cfg.rtsp.path,
+                on_client_connect=stream.request_keyframe,
+            )
+            if stream.attach_rtsp_server(rtsp_server):
+                rtsp_server.start()
+                log.info(
+                    "RTSP streaming enabled — rtsp://<ip>:%d%s",
+                    cfg.rtsp.port, cfg.rtsp.path,
+                )
+            else:
+                rtsp_server = None
+        else:
+            log.warning("RTSP streaming not available: %s", _RTSP_UNAVAILABLE_REASON)
+
     # Recorder (wraps stream)
     recorder = Recorder(
         stream,
@@ -115,6 +136,8 @@ def main() -> None:
             recorder.stop()
         if mdns_advertiser:
             mdns_advertiser.stop()
+        if rtsp_server:
+            rtsp_server.stop()
         stream.stop()
         log.info("Camera node stopped")
 

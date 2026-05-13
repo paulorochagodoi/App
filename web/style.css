@@ -350,3 +350,64 @@ html, body {
   align-items: center;
   justify-content: center;
 }
+
+/* ── RTSP info ──────────────────────────────────────────────────────────── */
+.rtsp-section {
+  margin: 24px 0 8px;
+  padding: 16px;
+  background: var(--surface);
+  border-radius: 8px;
+}
+
+.rtsp-section.hidden { display: none; }
+
+.rtsp-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--primary);
+  text-transform: uppercase;
+}
+
+.rtsp-desc {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.rtsp-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rtsp-url {
+  flex: 1;
+  font-size: 13px;
+  background: #1e1e1e;
+  padding: 8px 10px;
+  border-radius: 4px;
+  word-break: break-all;
+  color: #a5d6a7;
+}
+
+.btn-copy {
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  font-size: 18px;
+  background: var(--surface-2, #2c2c2c);
+  border: none;
+  border-radius: 4px;
+  color: var(--text-primary, #fff);
+  cursor: pointer;
+}
+
+.rtsp-copy-hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #a5d6a7;
+}
+
+.rtsp-copy-hint.hidden { display: none; }

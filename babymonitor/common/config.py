@@ -60,6 +60,13 @@ class SecurityConfig:
 
 
 @dataclass
+class RtspConfig:
+    enabled: bool = True
+    port: int = 8554
+    path: str = "/live"
+
+
+@dataclass
 class CameraConfig:
     ap: APConfig = field(default_factory=APConfig)
     fallback_wifi: WifiCredentials = field(default_factory=WifiCredentials)
@@ -68,6 +75,7 @@ class CameraConfig:
     recordings: RecordingsConfig = field(default_factory=RecordingsConfig)
     cry_detector: CryDetectorConfig = field(default_factory=CryDetectorConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    rtsp: RtspConfig = field(default_factory=RtspConfig)
 
 
 @dataclass
@@ -135,5 +143,10 @@ def save_camera_config(cfg: CameraConfig, path: str) -> None:
             "calibrate_on_start": cfg.cry_detector.calibrate_on_start,
         },
         "security": {"api_token": cfg.security.api_token},
+        "rtsp": {
+            "enabled": cfg.rtsp.enabled,
+            "port": cfg.rtsp.port,
+            "path": cfg.rtsp.path,
+        },
     }
     Path(path).write_text(yaml.safe_dump(data, allow_unicode=True))

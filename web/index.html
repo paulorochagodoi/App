@@ -46,7 +46,7 @@
 
   <main id="screen-wifi" class="screen hidden">
     <div class="screen-header">
-      <h2>Configurar WiFi</h2>
+      <h2>Configurações</h2>
     </div>
     <div class="wifi-form">
       <label for="wifi-ssid">Rede (SSID)</label>
@@ -56,13 +56,22 @@
       <button class="btn btn-save" onclick="saveWifi()">💾 Salvar</button>
       <p id="wifi-status" class="wifi-status"></p>
     </div>
+    <div id="rtsp-section" class="rtsp-section hidden">
+      <h3 class="rtsp-title">RTSP</h3>
+      <p class="rtsp-desc">Abra no VLC, ffplay ou qualquer cliente RTSP:</p>
+      <div class="rtsp-url-row">
+        <code id="rtsp-url" class="rtsp-url"></code>
+        <button class="btn btn-copy" onclick="copyRtspUrl()" title="Copiar URL">⎘</button>
+      </div>
+      <p id="rtsp-copy-hint" class="rtsp-copy-hint hidden">URL copiada!</p>
+    </div>
   </main>
 
   <!-- Tab bar -->
   <nav class="tab-bar">
     <button class="tab active" data-screen="live" onclick="showScreen('live')">📷 AO VIVO</button>
     <button class="tab" data-screen="recordings" onclick="showScreen('recordings')">🎞 GRAVAÇÕES</button>
-    <button class="tab" data-screen="wifi" onclick="showScreen('wifi')">⚙ WiFi</button>
+    <button class="tab" data-screen="wifi" onclick="showScreen('wifi')">⚙ Config</button>
   </nav>
 
   <script src="/static/hls.min.js"></script>
