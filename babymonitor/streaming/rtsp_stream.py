@@ -2,6 +2,9 @@
 
 Serves the live H.264 stream at rtsp://<host>:<port>/live.
 Compatible with VLC, ffplay, and any standard RTSP client.
+
+Required packages (beyond base GStreamer):
+    sudo apt-get install libgstrtspserver-1.0-0 gir1.2-gst-rtsp-server-1.0
 """
 from __future__ import annotations
 import threading
@@ -20,7 +23,12 @@ try:
     _RTSP_AVAILABLE = True
 except (ImportError, ValueError, OSError) as _exc:
     _RTSP_UNAVAILABLE_REASON = str(_exc)
-    log.warning("RTSP unavailable: %s", _exc)
+    log.warning(
+        "RTSP unavailable: %s\n"
+        "  Install missing packages with:\n"
+        "    sudo apt-get install libgstrtspserver-1.0-0 gir1.2-gst-rtsp-server-1.0",
+        _exc,
+    )
 
 
 class RtspServer:
@@ -29,9 +37,12 @@ class RtspServer:
 
     Architecture:
       Main GStreamer pipeline (enct tee)
-        → queue (leaky) → appsink          ← push_sample() feeds frames here
+        → queue (leaky) → appsink
       GstRtspServer media pipeline (shared, one instance for all RTSP clients)
-        appsrc ← push_sample() → h264parse → rtph264pay name=pay0
+        appsrc → h264parse → rtph264pay name=pay0
+
+    push_sample() is called by the main pipeline's appsink new-sample callback
+    and forwards the H.264 buffer to the RTSP appsrc.
 
     Usage:
       server = RtspServer(port=8554, path="/live")
@@ -43,7 +54,8 @@ class RtspServer:
         if not _RTSP_AVAILABLE:
             raise RuntimeError(
                 f"GstRtspServer not available: {_RTSP_UNAVAILABLE_REASON}\n"
-                "Install with: sudo apt-get install gstreamer1.0-rtsp python3-gi"
+                "Install with:\n"
+                "  sudo apt-get install libgstrtspserver-1.0-0 gir1.2-gst-rtsp-server-1.0"
             )
 
         self._port = port
@@ -56,11 +68,17 @@ class RtspServer:
         self._server.set_service(str(port))
 
         self._factory = _GstRtspServer.RTSPMediaFactory.new()
-        # Shared factory: all RTSP clients share one pipeline instance.
-        # appsrc receives H.264 byte-stream NAL units from the main pipeline.
+        # Shared factory: all RTSP clients reuse one pipeline instance.
+        #
+        # No caps on appsrc — the first push-sample call auto-negotiates them
+        # from the incoming H.264 sample, making this work with any encoder
+        # (v4l2h264enc, x264enc, openh264enc) regardless of stream-format.
+        #
+        # do-timestamp=true: generate timestamps from the RTSP pipeline's own
+        # clock instead of passing through the main pipeline's clock values,
+        # which avoids timestamp-domain mismatches that cause VLC to stall.
         self._factory.set_launch(
-            "( appsrc name=src format=3 is-live=true do-timestamp=false block=false"
-            '  caps="video/x-h264,stream-format=byte-stream,alignment=au"'
+            "( appsrc name=src format=3 is-live=true do-timestamp=true block=false"
             " ! h264parse config-interval=-1"
             " ! rtph264pay name=pay0 pt=96 config-interval=-1 )"
         )
@@ -76,8 +94,17 @@ class RtspServer:
 
     def start(self) -> None:
         """Attach the RTSP server to the default GLib main context."""
-        self._server.attach(None)
-        log.info("RTSP server started — rtsp://0.0.0.0:%d%s", self._port, self._path)
+        source_id = self._server.attach(None)
+        if source_id == 0:
+            log.error(
+                "RTSP server failed to attach to GLib main context "
+                "(port %d may already be in use)", self._port
+            )
+            return
+        log.info(
+            "RTSP server started — rtsp://0.0.0.0:%d%s",
+            self._port, self._path,
+        )
 
     def stop(self) -> None:
         with self._lock:
@@ -112,4 +139,4 @@ class RtspServer:
         appsrc = pipeline.get_by_name("src")
         with self._lock:
             self._appsrc = appsrc
-        log.info("RTSP media configured — appsrc ready (port %d)", self._port)
+        log.info("RTSP client connected — appsrc ready (port %d)", self._port)

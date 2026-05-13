@@ -53,6 +53,8 @@ apt-get install -y \
     gir1.2-gstreamer-1.0 \
     gir1.2-gst-plugins-base-1.0 \
     gir1.2-gst-plugins-bad-1.0 \
+    libgstrtspserver-1.0-0 \
+    gir1.2-gst-rtsp-server-1.0 \
     python3-picamera2 \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base \
@@ -60,6 +62,7 @@ apt-get install -y \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
+    gstreamer1.0-rtsp \
     gstreamer1.0-libcamera \
     libportaudio2 \
     portaudio19-dev \
