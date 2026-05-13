@@ -50,7 +50,7 @@ class RtspServer:
       server.start()                       # attaches to the GLib main context
     """
 
-    def __init__(self, port: int = 8554, path: str = "/live") -> None:
+    def __init__(self, port: int = 8554, path: str = "/live", on_client_connect=None) -> None:
         if not _RTSP_AVAILABLE:
             raise RuntimeError(
                 f"GstRtspServer not available: {_RTSP_UNAVAILABLE_REASON}\n"
@@ -62,6 +62,10 @@ class RtspServer:
         self._path = path
         self._appsrc: "Gst.Element | None" = None
         self._lock = threading.Lock()
+        # Optional callback invoked when the first RTSP client configures the
+        # media pipeline — use it to request a keyframe so VLC gets a valid
+        # IDR frame immediately instead of waiting for the next one.
+        self._on_client_connect = on_client_connect
 
         from gi.repository import GstRtspServer as _GstRtspServer
         self._server = _GstRtspServer.RTSPServer.new()
@@ -70,16 +74,17 @@ class RtspServer:
         self._factory = _GstRtspServer.RTSPMediaFactory.new()
         # Shared factory: all RTSP clients reuse one pipeline instance.
         #
-        # No caps on appsrc — the first push-sample call auto-negotiates them
-        # from the incoming H.264 sample, making this work with any encoder
-        # (v4l2h264enc, x264enc, openh264enc) regardless of stream-format.
+        # caps="video/x-h264" on appsrc lets GstRtspServer generate a valid
+        # SDP before the first sample arrives, so VLC knows the codec and can
+        # negotiate the session correctly.  The actual stream-format is
+        # auto-detected by h264parse from the first pushed buffer.
         #
-        # do-timestamp=true: generate timestamps from the RTSP pipeline's own
-        # clock instead of passing through the main pipeline's clock values,
-        # which avoids timestamp-domain mismatches that cause VLC to stall.
+        # do-timestamp=true: timestamps come from the RTSP pipeline's clock,
+        # avoiding mismatches with the main pipeline's clock domain.
         self._factory.set_launch(
-            "( appsrc name=src format=3 is-live=true do-timestamp=true block=false"
-            " ! h264parse config-interval=-1"
+            '( appsrc name=src format=3 is-live=true do-timestamp=true block=false'
+            '  caps="video/x-h264"'
+            " ! h264parse"
             " ! rtph264pay name=pay0 pt=96 config-interval=-1 )"
         )
         self._factory.set_shared(True)
@@ -137,6 +142,14 @@ class RtspServer:
     def _on_media_configure(self, factory, media) -> None:
         pipeline = media.get_element()
         appsrc = pipeline.get_by_name("src")
+        if appsrc is None:
+            log.error("RTSP media configured but appsrc element not found — check factory launch string")
+            return
         with self._lock:
             self._appsrc = appsrc
         log.info("RTSP client connected — appsrc ready (port %d)", self._port)
+        if self._on_client_connect:
+            try:
+                self._on_client_connect()
+            except Exception as exc:
+                log.debug("on_client_connect callback raised: %s", exc)

@@ -36,7 +36,11 @@ def main() -> None:
     if cfg.rtsp.enabled:
         from babymonitor.streaming.rtsp_stream import RtspServer, _RTSP_AVAILABLE, _RTSP_UNAVAILABLE_REASON
         if _RTSP_AVAILABLE:
-            rtsp_server = RtspServer(port=cfg.rtsp.port, path=cfg.rtsp.path)
+            rtsp_server = RtspServer(
+                port=cfg.rtsp.port,
+                path=cfg.rtsp.path,
+                on_client_connect=stream.request_keyframe,
+            )
             if stream.attach_rtsp_server(rtsp_server):
                 rtsp_server.start()
                 log.info(

@@ -628,6 +628,29 @@ class CameraStream:
         self._rtsp_tee_pad = None
         log.info("RTSP branch detached")
 
+    def request_keyframe(self) -> None:
+        """Request the encoder to produce an IDR keyframe as soon as possible.
+
+        Called when a new RTSP client connects so that VLC receives a valid
+        starting frame instead of waiting up to one keyframe interval.
+        """
+        if not self._enctee:
+            return
+        try:
+            from gi.repository import GstVideo as _GstVideo
+            event = _GstVideo.video_event_new_upstream_force_key_unit(
+                Gst.CLOCK_TIME_NONE, True, 1
+            )
+        except Exception:
+            event = Gst.Event.new_custom(
+                Gst.EventType.CUSTOM_UPSTREAM,
+                Gst.Structure.new_from_string("GstForceKeyUnit,all-headers=true"),
+            )
+        sink_pad = self._enctee.get_static_pad("sink")
+        if sink_pad:
+            sink_pad.send_event(event)
+            log.debug("Keyframe requested for RTSP client")
+
     def _on_rtsp_sample(self, sink) -> "Gst.FlowReturn":
         sample = sink.emit("pull-sample")
         if sample and self._rtsp_server:
