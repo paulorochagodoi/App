@@ -74,17 +74,22 @@ class RtspServer:
         self._factory = _GstRtspServer.RTSPMediaFactory.new()
         # Shared factory: all RTSP clients reuse one pipeline instance.
         #
-        # caps="video/x-h264" on appsrc lets GstRtspServer generate a valid
-        # SDP before the first sample arrives, so VLC knows the codec and can
-        # negotiate the session correctly.  The actual stream-format is
-        # auto-detected by h264parse from the first pushed buffer.
+        # The "! video/x-h264 !" between appsrc and h264parse is a standard
+        # GStreamer capsfilter element (not a property assignment).  It tells
+        # GstRtspServer that this stream is H.264 video BEFORE any sample is
+        # pushed, so the server can generate a valid SDP and VLC knows the
+        # codec up front.  h264parse auto-detects the exact stream-format from
+        # the first buffer (byte-stream vs. avc) so any H.264 encoder works.
         #
         # do-timestamp=true: timestamps come from the RTSP pipeline's clock,
         # avoiding mismatches with the main pipeline's clock domain.
+        #
+        # h264parse config-interval=-1: inject SPS/PPS before every IDR frame
+        # so a newly joining VLC client can decode without waiting.
         self._factory.set_launch(
-            '( appsrc name=src format=3 is-live=true do-timestamp=true block=false'
-            '  caps="video/x-h264"'
-            " ! h264parse"
+            "( appsrc name=src format=3 is-live=true do-timestamp=true block=false"
+            " ! video/x-h264"
+            " ! h264parse config-interval=-1"
             " ! rtph264pay name=pay0 pt=96 config-interval=-1 )"
         )
         self._factory.set_shared(True)
